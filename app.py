@@ -222,6 +222,18 @@ def analiziraj_status(text):
     if any(k in t for k in ind): return "Zatvoreno"
     return "Otvoreno"
 
+def izvuci_ocenu(tekst, plat):
+    """Funkcija koja pomoću Regularnih Ekspresija izvlači ocenu iz teksta"""
+    if not tekst: return "-"
+    tekst_lower = tekst.lower()
+    if plat == "Glovo":
+        match = re.search(r'(\d{1,3})\s*%', tekst_lower)
+        if match: return match.group(1) + "%"
+    elif plat == "Wolt":
+        match = re.search(r'\b([5-9][.,][0-9]|10[.,]0)\b', tekst_lower)
+        if match: return match.group(1).replace(',', '.')
+    return "-"
+
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', ime.lower())
 
 # ---------------- PAMETNO SKROLOVANJE ----------------
@@ -255,7 +267,17 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
             sve_z = text + " " + item['html'] if plat == "Wolt" else text
             ime = ukloni_kvacice(izvuci_ime(text))
             if len(ime) < 2: continue
-            results_dict[link] = {"Adresa": address, "Platforma": plat, "Naziv": ime, "Status": analiziraj_status(sve_z)}
+            
+            ocena = izvuci_ocenu(sve_z, plat)
+            
+            results_dict[link] = {
+                "Adresa": address, 
+                "Platforma": plat, 
+                "Naziv": ime, 
+                "Ocena": ocena,
+                "Status": analiziraj_status(sve_z),
+                "Link": link
+            }
 
         trenutni = len(results_dict)
         if trenutni > prethodni_broj:
@@ -274,7 +296,7 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
         else: pokusaji = 0
     return list(results_dict.values())
 
-# ---------------- SCRAPERS (ORIGINALNI VRAĆENI NAZAJ) ----------------
+# ---------------- SCRAPERS ----------------
 async def scrape_wolt(browser, address, log_ph=None):
     try:
         context = await browser.new_context(permissions=['geolocation'])
@@ -416,22 +438,28 @@ def napravi_zbirni_pdf(df, df_hist):
     doc.build(elements); return p_path
 
 # ---------------- CORE LOOP ----------------
-async def run_platform_scraper(p_name, p, adr, head, log_ph):
-    browser = await p.chromium.launch(headless=head) 
+async def run_platform_scraper(p_name, p, adr, log_ph):
+    # Ostavljen fiksno headless=True kako server zahteva!
+    browser = await p.chromium.launch(headless=True) 
     try:
         if p_name == "Wolt": return await scrape_wolt(browser, adr, log_ph)
         return await scrape_glovo(browser, adr, log_ph)
     finally: await browser.close()
 
-async def proces_skeniranja(adrese, head, log_ph):
+async def proces_skeniranja(adrese, log_ph):
     sve = []
     async with async_playwright() as p:
         for adr in adrese:
             log_msg(f"\n[SISTEM] Pokrecem skeniranje za: {adr}", log_ph)
-            r = await asyncio.gather(run_platform_scraper("Wolt", p, adr, head, log_ph), run_platform_scraper("Glovo", p, adr, head, log_ph))
+            r = await asyncio.gather(
+                run_platform_scraper("Wolt", p, adr, log_ph), 
+                run_platform_scraper("Glovo", p, adr, log_ph)
+            )
             sve.extend(r[0] + r[1])
     if sve:
-        df_s = pd.DataFrame(sve); df_h = sacuvaj_u_istoriju(df_s); log_msg("Generisem PDF izvestaje...", log_ph)
+        df_s = pd.DataFrame(sve)
+        df_h = sacuvaj_u_istoriju(df_s)
+        log_msg("Generisem PDF izvestaje...", log_ph)
         pdf = [napravi_zbirni_pdf(df_s, df_h)] + [napravi_pdf_za_adresu(df_s[df_s["Adresa"] == adr], adr, df_h) for adr in df_s["Adresa"].unique()]
         return df_s, df_h, pdf
     return pd.DataFrame(), pd.DataFrame(), []
@@ -446,32 +474,58 @@ if 'pdf_fajlovi' not in st.session_state: st.session_state.pdf_fajlovi = []
 st.title("🍔 Nadzor Dostave (Wolt & Glovo)")
 with st.sidebar:
     st.header("⚙️ Podešavanja")
-    adrese_input = st.text_area("📍 Adrese (svaku u novi red):", value="Presernova 8, Nis\nBulevar Nemanjica 20, Nis")
+    # Uklonjen default value i dodat placeholder sa primerom
+    adrese_input = st.text_area(
+        "📍 Adrese (svaku u novi red):", 
+        value="", 
+        placeholder="Primer:\nMakenzijeva 57, Beograd\nBulevar Nemanjica 20, Nis"
+    )
     sleep_interval = st.number_input("⏱️ Spavanje (min):", min_value=1, value=15)
-    headless_mode = st.checkbox("🕶️ Sakrij browser", value=True)
+    
     slanje_maila = st.checkbox("✉️ Email", value=False)
-    email_adrese = st.text_input("Mejlovi (odvojeni zarezom):", value="z.webb@live.com") if slanje_maila else ""
+    email_adrese = st.text_input(
+        "Mejlovi (odvojeni zarezom):", 
+        value="", 
+        placeholder="pera@gmail.com, mika@yahoo.com"
+    ) if slanje_maila else ""
+    
     st.markdown("---")
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("▶️ Pokreni", type="primary"): st.session_state.pokrenuto = True; st.session_state.last_run = 0; st.rerun()
+        if st.button("▶️ Pokreni", type="primary"): 
+            st.session_state.pokrenuto = True
+            st.session_state.last_run = 0
+            st.rerun()
     with c2:
-        if st.button("⏹️ Zaustavi"): st.session_state.pokrenuto = False; st.rerun()
+        if st.button("⏹️ Zaustavi"): 
+            st.session_state.pokrenuto = False
+            st.rerun()
 
 if st.session_state.pokrenuto:
     lista_adresa = [cirilica_u_latinicu(a.strip()) for a in adrese_input.split('\n') if a.strip()]
-    now = time.time(); time_since = now - st.session_state.last_run
+    
+    if not lista_adresa:
+        st.warning("⚠️ Molimo unesite bar jednu adresu za skeniranje!")
+        st.session_state.pokrenuto = False
+        st.rerun()
+
+    now = time.time()
+    time_since = now - st.session_state.last_run
+    
     if time_since >= sleep_interval * 60 or st.session_state.last_run == 0:
         sl = st.empty()
-        with st.spinner("Skeniranje..."):
-            df, hi, pdf = asyncio.run(proces_skeniranja(lista_adresa, headless_mode, sl))
+        with st.spinner("Skeniranje u toku, molimo sačekajte..."):
+            df, hi, pdf = asyncio.run(proces_skeniranja(lista_adresa, sl))
             st.session_state.df_sve, st.session_state.df_history, st.session_state.pdf_fajlovi, st.session_state.last_run = df, hi, pdf, time.time()
             if slanje_maila and pdf: posalji_email(pdf, email_adrese, sl)
-        sl.empty(); st.rerun()
+        sl.empty()
+        st.rerun()
 
     df = st.session_state.df_sve
     if not df.empty:
         st.success(f"✅ Osveženo u: {datetime.datetime.fromtimestamp(st.session_state.last_run).strftime('%H:%M:%S')}")
+        
+        # --- ZBIRNI GRAFIKONI ---
         st.subheader("📊 Interaktivni Grafikoni")
         g1, g2 = st.columns(2)
         with g1: graf_adr = st.selectbox("📍 Adresa:", ["Sve adrese"] + list(df["Adresa"].unique()))
@@ -485,32 +539,99 @@ if st.session_state.pokrenuto:
         with ca: st.image(kreiraj_grafikon_status(c_df, n1), use_container_width=True)
         with cb: st.image(kreiraj_timeline_grafikon(c_hi, None, n2), use_container_width=True)
         st.markdown("---")
+
+        # --- ZBIRNO PO ADRESAMA ---
         st.subheader("📊 Zbirni po Adresama")
         tc = st.columns(len(df["Adresa"].unique()))
         for i, adr in enumerate(df["Adresa"].unique()):
             with tc[i % len(tc)]:
                 st.markdown(f"**📍 {adr.upper()}**")
-                sd = df[df["Adresa"] == adr]; sm = []
+                sd = df[df["Adresa"] == adr]
+                sm = []
                 for p in ["Wolt", "Glovo"]:
                     pd_f = sd[sd["Platforma"] == p]
                     if not pd_f.empty: sm.append({"Platforma": p, "Nadjeno": len(pd_f), "Otvoreno": len(pd_f[pd_f["Status"]=="Otvoreno"]), "Zatvoreno": len(pd_f[pd_f["Status"]=="Zatvoreno"])})
                 if sm: st.dataframe(pd.DataFrame(sm), hide_index=True, use_container_width=True)
         st.markdown("---")
-        st.subheader("🔍 Lista Restorana")
+
+        # --- UPOREDNI PRIKAZ ZAJEDNIČKIH RESTORANA ---
+        st.subheader("⚖️ Uporedni Prikaz (Restorani na obe platforme)")
+        df['Naziv_Norm'] = df['Naziv'].apply(normalizuj_ime)
+        uporedni_podaci = []
+        for adr in df['Adresa'].unique():
+            df_adr = df[df['Adresa'] == adr]
+            wolt_df = df_adr[df_adr['Platforma'] == 'Wolt']
+            glovo_df = df_adr[df_adr['Platforma'] == 'Glovo']
+            
+            zajednicki = set(wolt_df['Naziv_Norm']).intersection(set(glovo_df['Naziv_Norm']))
+            for norm_ime in zajednicki:
+                w_row = wolt_df[wolt_df['Naziv_Norm'] == norm_ime].iloc[0]
+                g_row = glovo_df[glovo_df['Naziv_Norm'] == norm_ime].iloc[0]
+                
+                uporedni_podaci.append({
+                    "Adresa": adr,
+                    "Naziv (Wolt)": w_row['Naziv'],
+                    "Status Wolt": w_row['Status'],
+                    "Ocena Wolt": w_row['Ocena'],
+                    "Link Wolt": w_row['Link'],
+                    "Naziv (Glovo)": g_row['Naziv'],
+                    "Status Glovo": g_row['Status'],
+                    "Ocena Glovo": g_row['Ocena'],
+                    "Link Glovo": g_row['Link']
+                })
+        
+        if uporedni_podaci:
+            df_uporedni = pd.DataFrame(uporedni_podaci)
+            
+            def color_wolt_glovo(val):
+                color = '#27ae60' if val == 'Otvoreno' else '#e74c3c' if val == 'Zatvoreno' else ''
+                return f'color: {color}; font-weight: bold;'
+            
+            st.dataframe(
+                df_uporedni.style.map(color_wolt_glovo, subset=['Status Wolt', 'Status Glovo']),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Link Wolt": st.column_config.LinkColumn("Link Wolt", display_text="Otvori Wolt"),
+                    "Link Glovo": st.column_config.LinkColumn("Link Glovo", display_text="Otvori Glovo")
+                }
+            )
+        else:
+            st.info("Nema restorana koji se nalaze na obe platforme za odabrane adrese.")
+
+        st.markdown("---")
+
+        # --- LISTA SVIH RESTORANA (FILTERI) ---
+        st.subheader("🔍 Detaljna Lista Restorana")
         f1, f2, f3 = st.columns(3)
         with f1: fa = st.multiselect("📍 Adresa", df["Adresa"].unique(), df["Adresa"].unique())
         with f2: fp = st.multiselect("📱 Platforma", df["Platforma"].unique(), df["Platforma"].unique())
         with f3: fs = st.multiselect("🚦 Status", ["Otvoreno", "Zatvoreno"], ["Otvoreno", "Zatvoreno"])
+        
         f_df = df[(df["Adresa"].isin(fa)) & (df["Platforma"].isin(fp)) & (df["Status"].isin(fs))]
-        st.dataframe(f_df.style.map(lambda v: f'color: {"#27ae60" if v=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status']), use_container_width=True, hide_index=True)
+        
+        disp_df = f_df.drop(columns=['Naziv_Norm']) if 'Naziv_Norm' in f_df.columns else f_df
+
+        st.dataframe(
+            disp_df.style.map(lambda v: f'color: {"#27ae60" if v=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status']), 
+            use_container_width=True, 
+            hide_index=True,
+            column_config={
+                "Link": st.column_config.LinkColumn("Link", display_text="Otvori na sajtu")
+            }
+        )
+
+        # --- PREUZIMANJE PDF-a ---
         if st.session_state.pdf_fajlovi:
-            st.markdown("---"); st.subheader("📥 PDF Izvestaji")
+            st.markdown("---"); st.subheader("📥 PDF Izveštaji")
             pc = st.columns(4)
             for i, p in enumerate(st.session_state.pdf_fajlovi):
                 with pc[i % 4]:
-                    with open(p, "rb") as f: st.download_button(f"Preuzmi {os.path.basename(p)}", f.read(), os.path.basename(p), "application/pdf", key=f"p_{i}")
+                    with open(p, "rb") as f: 
+                        st.download_button(f"Preuzmi {os.path.basename(p)}", f.read(), os.path.basename(p), "application/pdf", key=f"p_{i}")
 
     rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
     if rem > 0:
         st.info(f"⏳ Sledeće skeniranje za **{rem}** s..."); time.sleep(1); st.rerun()
-else: st.info("Sistem zaustavljen.")
+else: 
+    st.info("Sistem zaustavljen. Unesite parametre u meniju sa leve strane i kliknite 'Pokreni'.")
