@@ -189,7 +189,6 @@ def kreiraj_timeline_grafikon(df_hist, adresa=None, custom_naslov=None, is_pdf=F
             if index % step != 0: 
                 label.set_visible(False)
                 
-        # ISPRAVLJENO: 'not' umesto 'ne'
         plt.xticks(rotation=45 if not jedan_dan else 0, fontsize=9)
         plt.yticks(fontsize=10)
         
@@ -249,28 +248,32 @@ def analiziraj_status(text):
     return "Otvoreno"
 
 def izvuci_ocenu(tekst, plat):
-    if not tekst: return "-"
-    tekst_lower = tekst.lower()
-    
-    ocena = None
-    if plat == "Glovo":
-        procenti = re.findall(r'(\d{1,3})\s*%', tekst_lower)
-        for p in procenti:
-            if int(p) >= 60:
-                ocena = p + "%"
-                break
-    elif plat == "Wolt":
-        match = re.search(r'\b([5-9][.,][0-9]|10[.,]0)\b', tekst_lower)
-        if match: 
-            ocena = match.group(1).replace(',', '.')
+    # Try/Except osigurač: Ako se desi bilo kakva greška ovde, skripta neće pući, samo će vratiti "-"
+    try:
+        if not tekst: return "-"
+        tekst_lower = tekst.lower()
+        
+        ocena = None
+        if plat == "Glovo":
+            procenti = re.findall(r'(\d{1,3})\s*%', tekst_lower)
+            for p in procenti:
+                if int(p) >= 60:
+                    ocena = p + "%"
+                    break
+        elif plat == "Wolt":
+            match = re.search(r'\b([5-9][.,][0-9]|10[.,]0)\b', tekst_lower)
+            if match: 
+                ocena = match.group(1).replace(',', '.')
+                
+        if ocena:
+            return ocena
             
-    if ocena:
-        return ocena
-        
-    if re.search(r'\b(novo|new)\b', tekst_lower):
-        return "Novo"
-        
-    return "-"
+        if re.search(r'\b(novo|new)\b', tekst_lower):
+            return "Novo"
+            
+        return "-"
+    except Exception:
+        return "-"
 
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', ime.lower())
 
@@ -334,7 +337,7 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
         else: pokusaji = 0
     return list(results_dict.values())
 
-# ---------------- SCRAPERS ----------------
+# ---------------- SCRAPERS (Vraćena STARA stabilna logika za Glovo) ----------------
 async def scrape_wolt(browser, address, log_ph=None):
     try:
         context = await browser.new_context(permissions=['geolocation'])
