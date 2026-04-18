@@ -248,7 +248,6 @@ def analiziraj_status(text):
     return "Otvoreno"
 
 def izvuci_ocenu(tekst, plat):
-    # Try/Except osigurač: Ako se desi bilo kakva greška ovde, skripta neće pući, samo će vratiti "-"
     try:
         if not tekst: return "-"
         tekst_lower = tekst.lower()
@@ -337,7 +336,7 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
         else: pokusaji = 0
     return list(results_dict.values())
 
-# ---------------- SCRAPERS (Vraćena STARA stabilna logika za Glovo) ----------------
+# ---------------- SCRAPERS ----------------
 async def scrape_wolt(browser, address, log_ph=None):
     try:
         context = await browser.new_context(permissions=['geolocation'])
@@ -547,6 +546,17 @@ with st.sidebar:
         if st.button("⏹️ Zaustavi"): 
             st.session_state.pokrenuto = False
             st.rerun()
+            
+    st.markdown("---")
+    if st.button("🗑️ Obriši istoriju", use_container_width=True):
+        if os.path.exists(HISTORY_FILE):
+            try:
+                os.remove(HISTORY_FILE)
+            except:
+                pass
+        st.session_state.df_history = pd.DataFrame()
+        st.sidebar.success("Istorija uspešno obrisana!")
+        st.rerun()
 
 if st.session_state.pokrenuto:
     lista_adresa = [cirilica_u_latinicu(a.strip()) for a in adrese_input.split('\n') if a.strip()]
@@ -575,7 +585,13 @@ if st.session_state.pokrenuto:
         st.subheader("📊 Interaktivni Grafikoni i Istorijat")
         
         g1, g2 = st.columns(2)
-        with g1: graf_adr = st.selectbox("📍 Filtriraj po Adresi:", ["Sve adrese"] + list(df["Adresa"].unique()))
+        
+        # PAMETNI DEFAULT FILTER ZA ADRESU
+        adrese_un = list(df["Adresa"].unique())
+        opcije_a = ["Sve adrese"] + adrese_un
+        def_idx = 1 if len(adrese_un) == 1 else 0
+        
+        with g1: graf_adr = st.selectbox("📍 Filtriraj po Adresi:", opcije_a, index=def_idx)
         with g2: graf_pla = st.selectbox("📱 Filtriraj po Platformi:", ["Sve platforme", "Wolt", "Glovo"])
         
         st.markdown("##### 📅 Filter vremena za Istorijat")
@@ -704,6 +720,11 @@ if st.session_state.pokrenuto:
 
     rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
     if rem > 0:
-        st.info(f"⏳ Sledeće skeniranje za **{rem}** s..."); time.sleep(1); st.rerun()
+        st.info(f"⏳ Sledeće skeniranje za **{rem}** s...")
+        time.sleep(1)
+        st.rerun()
+    else:
+        # Automatski obara rerun kada istekne tajmer (okida novo skeniranje)
+        st.rerun()
 else: 
     st.info("Sistem zaustavljen. Unesite parametre u meniju sa leve strane i kliknite 'Pokreni'.")
