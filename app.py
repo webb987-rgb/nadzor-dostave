@@ -132,7 +132,6 @@ def sacuvaj_u_istoriju(df):
     try: df_kombinovano.to_csv(fajl_str, index=False)
     except: pass
     
-    # Automatski ažuriramo Session State da istorija odmah bude dostupna
     st.session_state.df_history = df_kombinovano
     return df_kombinovano
 
@@ -157,12 +156,10 @@ def kreiraj_timeline_grafikon(df_hist, adresa=None, custom_naslov=None, is_pdf=F
         ax.text(0.5, 0.5, "Nema istorijskih podataka za ovaj period", ha='center', va='center')
         ax.axis('off')
     else:
-        # Pametno formatiranje X-ose (prikazuje datum samo ako je filtrirano više dana)
         jedan_dan = df_sub["Datum"].nunique() <= 1
         if jedan_dan:
             df_sub["X_Label"] = df_sub["Vreme"]
         else:
-            # Prikazuje MM-DD HH:MM
             df_sub["X_Label"] = df_sub["Datum"].str[-5:].str.replace('-', '.') + " \n" + df_sub["Vreme"]
 
         prikazi_wolt = "Wolt" in df_sub["Platforma"].values
@@ -171,7 +168,6 @@ def kreiraj_timeline_grafikon(df_hist, adresa=None, custom_naslov=None, is_pdf=F
         wolt_data = df_sub[df_sub["Platforma"] == "Wolt"]
         glovo_data = df_sub[df_sub["Platforma"] == "Glovo"]
 
-        # Ako pravimo PDF, režemo na poslednjih 48 unosa (12 sati) da graf ne bude pretrpan
         if is_pdf:
             wolt_data = wolt_data.tail(48)
             glovo_data = glovo_data.tail(48)
@@ -186,15 +182,15 @@ def kreiraj_timeline_grafikon(df_hist, adresa=None, custom_naslov=None, is_pdf=F
         ax.legend(frameon=True, fontsize=10, loc='lower center', bbox_to_anchor=(0.5, -0.3), ncol=2) 
         ax.grid(True, linestyle='--', alpha=0.6)
         
-        # Pametno sakrivanje labela da se ne bi preklopile ako izabereš prevelik raspon
         n_ticks = len(wolt_data) if prikazi_wolt else (len(glovo_data) if prikazi_glovo else 0)
-        step = max(1, n_ticks // 15) # Uvek prikazuje maksimalno oko 15 datuma na osi
+        step = max(1, n_ticks // 15) 
         
         for index, label in enumerate(ax.xaxis.get_ticklabels()):
             if index % step != 0: 
                 label.set_visible(False)
                 
-        plt.xticks(rotation=45 if ne jedan_dan else 0, fontsize=9)
+        # ISPRAVLJENO: 'not' umesto 'ne'
+        plt.xticks(rotation=45 if not jedan_dan else 0, fontsize=9)
         plt.yticks(fontsize=10)
         
     plt.tight_layout()
@@ -434,7 +430,6 @@ def napravi_pdf_za_adresu(df_adr, adr, df_hist):
     t_z = Table(tab, colWidths=[120, 100, 100, 100])
     t_z.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.HexColor("#34495e")),('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),('ALIGN', (0,0), (-1,-1), 'CENTER'),('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#bdc3c7"))]))
     
-    # Dodajemo PDF argument is_pdf=True
     elements.extend([t_z, Spacer(1, 20), Table([[Image(kreiraj_grafikon_status(df_adr, f"Status - {adr}"), width=280, height=224)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), Spacer(1, 10), Table([[Image(kreiraj_timeline_grafikon(df_hist, adr, is_pdf=True), width=500, height=200)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), PageBreak()])
 
     wn = {normalizuj_ime(r["Naziv"]): r for _, r in df_adr[df_adr["Platforma"] == "Wolt"].iterrows()}
@@ -469,7 +464,6 @@ def napravi_zbirni_pdf(df, df_hist):
     ns = ParagraphStyle('Naslov', parent=styles['Title'], textColor=colors.HexColor("#2c3e50"), fontSize=20, spaceAfter=20)
     ps = ParagraphStyle('Podnaslov', parent=styles['Heading2'], textColor=colors.HexColor("#2980b9"), fontSize=16, spaceBefore=20, spaceAfter=15)
     
-    # Dodajemo PDF argument is_pdf=True
     elements = [Paragraph("Zbirni Izvestaj - Sve Adrese", ns), Table([[Image(kreiraj_grafikon_status(df, "Ukupni Status"), width=280, height=224)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), Spacer(1, 10), Table([[Image(kreiraj_timeline_grafikon(df_hist, None, is_pdf=True), width=500, height=200)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), PageBreak()]
     
     for adr in df["Adresa"].unique():
@@ -516,7 +510,6 @@ if 'last_run' not in st.session_state: st.session_state.last_run = 0
 if 'df_sve' not in st.session_state: st.session_state.df_sve = pd.DataFrame()
 if 'pdf_fajlovi' not in st.session_state: st.session_state.pdf_fajlovi = []
 
-# PAMETNO UČITAVANJE ISTORIJE ODMAH NA POČETKU (Da bi grafikon bio tu i pre skeniranja)
 if 'df_history' not in st.session_state: 
     if os.path.exists(HISTORY_FILE):
         st.session_state.df_history = pd.read_csv(HISTORY_FILE)
@@ -576,14 +569,12 @@ if st.session_state.pokrenuto:
     if not df.empty:
         st.success(f"✅ Osveženo u: {datetime.datetime.fromtimestamp(st.session_state.last_run).strftime('%H:%M:%S')}")
         
-        # --- ZBIRNI GRAFIKONI ---
         st.subheader("📊 Interaktivni Grafikoni i Istorijat")
         
         g1, g2 = st.columns(2)
         with g1: graf_adr = st.selectbox("📍 Filtriraj po Adresi:", ["Sve adrese"] + list(df["Adresa"].unique()))
         with g2: graf_pla = st.selectbox("📱 Filtriraj po Platformi:", ["Sve platforme", "Wolt", "Glovo"])
         
-        # TIMELINE FILTERI
         st.markdown("##### 📅 Filter vremena za Istorijat")
         hist_df = st.session_state.df_history.copy()
         
@@ -601,7 +592,6 @@ if st.session_state.pokrenuto:
             start_dt = pd.to_datetime(datetime.datetime.combine(start_date, start_time))
             end_dt = pd.to_datetime(datetime.datetime.combine(end_date, end_time))
             
-            # Primenjujemo filter datuma/vremena na istoriju
             mask = (hist_df['Datetime'] >= start_dt) & (hist_df['Datetime'] <= end_dt)
             chart_hist = hist_df.loc[mask].copy()
         else:
@@ -623,7 +613,6 @@ if st.session_state.pokrenuto:
         with cb: st.image(kreiraj_timeline_grafikon(chart_hist, None, n2, is_pdf=False), use_container_width=True)
         st.markdown("---")
 
-        # --- ZBIRNO PO ADRESAMA ---
         st.subheader("📊 Zbirni po Adresama")
         tc = st.columns(len(df["Adresa"].unique()))
         for i, adr in enumerate(df["Adresa"].unique()):
@@ -637,7 +626,6 @@ if st.session_state.pokrenuto:
                 if sm: st.dataframe(pd.DataFrame(sm), hide_index=True, use_container_width=True)
         st.markdown("---")
 
-        # --- UPOREDNI PRIKAZ ZAJEDNIČKIH RESTORANA ---
         st.subheader("⚖️ Uporedni Prikaz (Restorani na obe platforme)")
         df['Naziv_Norm'] = df['Naziv'].apply(normalizuj_ime)
         uporedni_podaci = []
@@ -684,7 +672,6 @@ if st.session_state.pokrenuto:
 
         st.markdown("---")
 
-        # --- LISTA SVIH RESTORANA (FILTERI) ---
         st.subheader("🔍 Detaljna Lista Restorana")
         f1, f2, f3 = st.columns(3)
         with f1: fa = st.multiselect("📍 Adresa", df["Adresa"].unique(), df["Adresa"].unique())
@@ -704,7 +691,6 @@ if st.session_state.pokrenuto:
             }
         )
 
-        # --- PREUZIMANJE PDF-a ---
         if st.session_state.pdf_fajlovi:
             st.markdown("---"); st.subheader("📥 PDF Izveštaji")
             pc = st.columns(4)
