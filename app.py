@@ -223,15 +223,28 @@ def analiziraj_status(text):
     return "Otvoreno"
 
 def izvuci_ocenu(tekst, plat):
-    """Funkcija koja pomoću Regularnih Ekspresija izvlači ocenu iz teksta"""
+    """Izvlači pravu ocenu restorana uz filtriranje popusta (sve ispod 60% se ignoriše) i prepoznaje NOVO"""
     if not tekst: return "-"
     tekst_lower = tekst.lower()
+    
+    ocena = None
     if plat == "Glovo":
-        match = re.search(r'(\d{1,3})\s*%', tekst_lower)
-        if match: return match.group(1) + "%"
+        procenti = re.findall(r'(\d{1,3})\s*%', tekst_lower)
+        for p in procenti:
+            if int(p) >= 60:
+                ocena = p + "%"
+                break
     elif plat == "Wolt":
         match = re.search(r'\b([5-9][.,][0-9]|10[.,]0)\b', tekst_lower)
-        if match: return match.group(1).replace(',', '.')
+        if match: 
+            ocena = match.group(1).replace(',', '.')
+            
+    if ocena:
+        return ocena
+        
+    if re.search(r'\b(novo|new)\b', tekst_lower):
+        return "Novo"
+        
     return "-"
 
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', ime.lower())
@@ -439,7 +452,6 @@ def napravi_zbirni_pdf(df, df_hist):
 
 # ---------------- CORE LOOP ----------------
 async def run_platform_scraper(p_name, p, adr, log_ph):
-    # Ostavljen fiksno headless=True kako server zahteva!
     browser = await p.chromium.launch(headless=True) 
     try:
         if p_name == "Wolt": return await scrape_wolt(browser, adr, log_ph)
@@ -474,7 +486,6 @@ if 'pdf_fajlovi' not in st.session_state: st.session_state.pdf_fajlovi = []
 st.title("🍔 Nadzor Dostave (Wolt & Glovo)")
 with st.sidebar:
     st.header("⚙️ Podešavanja")
-    # Uklonjen default value i dodat placeholder sa primerom
     adrese_input = st.text_area(
         "📍 Adrese (svaku u novi red):", 
         value="", 
