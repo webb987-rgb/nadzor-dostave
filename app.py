@@ -274,68 +274,74 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
         else: pokusaji = 0
     return list(results_dict.values())
 
-# ---------------- SCRAPERS (SA STEALTH MODOM) ----------------
-async def scrape_wolt(browser, adr, log_ph=None):
+# ---------------- SCRAPERS (ORIGINALNI VRAĆENI NAZAJ) ----------------
+async def scrape_wolt(browser, address, log_ph=None):
     try:
-        ctx = await browser.new_context(
-            permissions=['geolocation'],
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={"width": 1920, "height": 1080},
-            locale="sr-RS"
-        )
-        await ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        
-        page = await ctx.new_page()
-        await page.goto("https://wolt.com/sr/srb", timeout=60000)
-        await asyncio.sleep(2)
+        context = await browser.new_context(permissions=['geolocation'])
+        page = await context.new_page()
+        await page.goto("https://wolt.com/sr/srb")
         try: await page.locator("[data-test-id='allow-button']").click(timeout=3000)
         except: pass
-        f = page.get_by_role("combobox"); await f.click(); await f.fill(adr)
-        await asyncio.sleep(2); await page.keyboard.press("ArrowDown"); await page.keyboard.press("Enter")
-        await asyncio.sleep(5); await page.goto("https://wolt.com/sr/discovery/restaurants")
+        input_f = page.get_by_role("combobox")
+        await input_f.click()
+        await input_f.fill(address)
+        await asyncio.sleep(2)
+        await page.keyboard.press("ArrowDown")
+        await page.keyboard.press("Enter")
+        await asyncio.sleep(5)
+        await page.goto("https://wolt.com/sr/discovery/restaurants")
         try: await page.wait_for_selector("a[data-test-id^='venueCard.']", timeout=10000)
         except: return []
-        res = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", adr, log_ph)
-        await ctx.close(); return res
+
+        rezultati = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", address, log_ph)
+        await context.close()
+        return rezultati
     except Exception as e: 
         log_msg(f"[WOLT GREŠKA] {e}", log_ph)
         return []
 
-async def scrape_glovo(browser, adr, log_ph=None):
+async def scrape_glovo(browser, address, log_ph=None):
     try:
-        # STEALTH MASKIRANJE ZA CLOUD-FLARE I DATADOME
-        ctx = await browser.new_context(
-            permissions=['geolocation'],
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={"width": 1920, "height": 1080},
-            locale="sr-RS"
-        )
-        await ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        
-        page = await ctx.new_page()
-        await page.goto("https://glovoapp.com/sr/rs", timeout=60000)
-        await asyncio.sleep(2)
+        context = await browser.new_context(permissions=['geolocation'])
+        page = await context.new_page()
+        await page.goto("https://glovoapp.com/sr/rs")
         try: await page.get_by_role("button", name=re.compile("Accept|Prihvati", re.I)).click(timeout=3000)
         except: pass
         await page.locator("#hero-container-input").click()
-        s = page.get_by_role("searchbox"); await s.fill(adr)
-        await asyncio.sleep(1)
+        search = page.get_by_role("searchbox")
+        await search.fill(address)
         try:
-            d = page.locator("div[data-actionable='true'][role='button']").first
-            await d.wait_for(state="visible", timeout=8000); await d.click()
+            dropdown_item = page.locator("div[data-actionable='true'][role='button']").first
+            await dropdown_item.wait_for(state="visible", timeout=8000)
+            await dropdown_item.click()
         except: await page.keyboard.press("Enter")
+        try:
+            btn_drugo = page.locator("button:has-text('Drugo')")
+            await btn_drugo.wait_for(state="visible", timeout=4000)
+            await btn_drugo.click()
+        except: pass
+        try:
+            btn_potvrdi = page.locator("button:has-text('Potvrdi adresu')")
+            await btn_potvrdi.wait_for(state="visible", timeout=4000)
+            await btn_potvrdi.click()
+        except: pass
         await asyncio.sleep(5)
         try:
-            b = page.locator("text='Idi na početnu stranicu'")
-            if await b.count() > 0: await b.first.click(); await asyncio.sleep(4)
+            btn_pocetna = page.locator("text='Idi na početnu stranicu'")
+            if await btn_pocetna.count() > 0 and await btn_pocetna.first.is_visible(timeout=3000):
+                await btn_pocetna.first.click()
+                await asyncio.sleep(5) 
         except: pass
         try:
-            k = page.get_by_role("link", name=re.compile(r"Restorani|Hrana", re.I)).first
-            await k.wait_for(state="visible", timeout=7000); await k.click()
+            kat_link = page.get_by_role("link", name=re.compile(r"Restorani|Hrana", re.I)).first
+            await kat_link.wait_for(state="visible", timeout=7000)
+            await kat_link.click()
         except: pass
-        await asyncio.sleep(4)
-        res = await pametno_skrolovanje_i_ekstrakcija(page, "Glovo", adr, log_ph)
-        await ctx.close(); return res
+        await asyncio.sleep(5)
+
+        rezultati = await pametno_skrolovanje_i_ekstrakcija(page, "Glovo", address, log_ph)
+        await context.close()
+        return rezultati
     except Exception as e: 
         log_msg(f"[GLOVO GREŠKA] {e}", log_ph)
         return []
@@ -411,11 +417,7 @@ def napravi_zbirni_pdf(df, df_hist):
 
 # ---------------- CORE LOOP ----------------
 async def run_platform_scraper(p_name, p, adr, head, log_ph):
-    # Dodajemo argumente da Playwright izgleda kao obican browser
-    browser = await p.chromium.launch(
-        headless=head,
-        args=["--disable-blink-features=AutomationControlled", "--disable-infobars"]
-    ) 
+    browser = await p.chromium.launch(headless=head) 
     try:
         if p_name == "Wolt": return await scrape_wolt(browser, adr, log_ph)
         return await scrape_glovo(browser, adr, log_ph)
