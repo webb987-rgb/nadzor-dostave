@@ -37,7 +37,6 @@ if sys.platform == "win32":
 @st.cache_resource
 def install_playwright():
     import os
-    # Instaliramo samo browser, drajvere će povući packages.txt
     os.system("playwright install chromium")
 
 install_playwright()
@@ -275,11 +274,20 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
         else: pokusaji = 0
     return list(results_dict.values())
 
-# ---------------- SCRAPERS ----------------
+# ---------------- SCRAPERS (SA STEALTH MODOM) ----------------
 async def scrape_wolt(browser, adr, log_ph=None):
     try:
-        ctx = await browser.new_context(permissions=['geolocation'])
-        page = await ctx.new_page(); await page.goto("https://wolt.com/sr/srb")
+        ctx = await browser.new_context(
+            permissions=['geolocation'],
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
+            locale="sr-RS"
+        )
+        await ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
+        page = await ctx.new_page()
+        await page.goto("https://wolt.com/sr/srb", timeout=60000)
+        await asyncio.sleep(2)
         try: await page.locator("[data-test-id='allow-button']").click(timeout=3000)
         except: pass
         f = page.get_by_role("combobox"); await f.click(); await f.fill(adr)
@@ -289,16 +297,29 @@ async def scrape_wolt(browser, adr, log_ph=None):
         except: return []
         res = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", adr, log_ph)
         await ctx.close(); return res
-    except: return []
+    except Exception as e: 
+        log_msg(f"[WOLT GREŠKA] {e}", log_ph)
+        return []
 
 async def scrape_glovo(browser, adr, log_ph=None):
     try:
-        ctx = await browser.new_context(permissions=['geolocation'])
-        page = await ctx.new_page(); await page.goto("https://glovoapp.com/sr/rs")
+        # STEALTH MASKIRANJE ZA CLOUD-FLARE I DATADOME
+        ctx = await browser.new_context(
+            permissions=['geolocation'],
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
+            locale="sr-RS"
+        )
+        await ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
+        page = await ctx.new_page()
+        await page.goto("https://glovoapp.com/sr/rs", timeout=60000)
+        await asyncio.sleep(2)
         try: await page.get_by_role("button", name=re.compile("Accept|Prihvati", re.I)).click(timeout=3000)
         except: pass
         await page.locator("#hero-container-input").click()
         s = page.get_by_role("searchbox"); await s.fill(adr)
+        await asyncio.sleep(1)
         try:
             d = page.locator("div[data-actionable='true'][role='button']").first
             await d.wait_for(state="visible", timeout=8000); await d.click()
@@ -315,7 +336,9 @@ async def scrape_glovo(browser, adr, log_ph=None):
         await asyncio.sleep(4)
         res = await pametno_skrolovanje_i_ekstrakcija(page, "Glovo", adr, log_ph)
         await ctx.close(); return res
-    except: return []
+    except Exception as e: 
+        log_msg(f"[GLOVO GREŠKA] {e}", log_ph)
+        return []
 
 # ---------------- PDF LOGIC ----------------
 def napravi_pdf_za_adresu(df_adr, adr, df_hist):
@@ -388,7 +411,11 @@ def napravi_zbirni_pdf(df, df_hist):
 
 # ---------------- CORE LOOP ----------------
 async def run_platform_scraper(p_name, p, adr, head, log_ph):
-    browser = await p.chromium.launch(headless=head) 
+    # Dodajemo argumente da Playwright izgleda kao obican browser
+    browser = await p.chromium.launch(
+        headless=head,
+        args=["--disable-blink-features=AutomationControlled", "--disable-infobars"]
+    ) 
     try:
         if p_name == "Wolt": return await scrape_wolt(browser, adr, log_ph)
         return await scrape_glovo(browser, adr, log_ph)
