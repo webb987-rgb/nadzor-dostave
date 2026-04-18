@@ -209,19 +209,30 @@ def kreiraj_grafikon_status(df_sub, naslov):
     prikazi_wolt = "Wolt" in df_sub["Platforma"].values or df_sub.empty
     prikazi_glovo = "Glovo" in df_sub["Platforma"].values or df_sub.empty
     
+    # Fiksirane dimenzije i širina kolona da grafik uvek bude isti
     if prikazi_wolt and prikazi_glovo:
-        ax.bar([0, 1], [wolt_o, wolt_z], 0.35, label='Wolt', color='#00c2e8')
-        ax.bar([0.35, 1.35], [glovo_o, glovo_z], 0.35, label='Glovo', color='#ffc244')
-        ax.set_xticks([0.175, 1.175])
+        ax.bar([0.2, 0.8], [wolt_o, wolt_z], width=0.35, label='Wolt', color='#00c2e8')
+        ax.bar([1.2, 1.8], [glovo_o, glovo_z], width=0.35, label='Glovo', color='#ffc244')
+        ax.set_xticks([0.5, 1.5])
+        ax.set_xlim(-0.2, 2.2)
     elif prikazi_wolt:
-        ax.bar([0, 1], [wolt_o, wolt_z], 0.35, label='Wolt', color='#00c2e8'); ax.set_xticks([0, 1])
+        ax.bar([0.2, 0.8], [wolt_o, wolt_z], width=0.35, label='Wolt', color='#00c2e8')
+        ax.set_xticks([0.5])
+        ax.set_xlim(-0.2, 1.2)
     elif prikazi_glovo:
-        ax.bar([0, 1], [glovo_o, glovo_z], 0.35, label='Glovo', color='#ffc244'); ax.set_xticks([0, 1])
+        ax.bar([0.2, 0.8], [glovo_o, glovo_z], width=0.35, label='Glovo', color='#ffc244')
+        ax.set_xticks([0.5])
+        ax.set_xlim(-0.2, 1.2)
         
-    ax.set_xticklabels(['Otvoreno', 'Zatvoreno'])
+    ax.set_xticklabels(['Otvoreno/Zatvoreno'] if not (prikazi_wolt and prikazi_glovo) else ['Wolt\n(Otv/Zat)', 'Glovo\n(Otv/Zat)'])
+    
+    max_val = max([wolt_o, wolt_z, glovo_o, glovo_z]) if max([wolt_o, wolt_z, glovo_o, glovo_z]) > 0 else 10
+    ax.set_ylim(0, max_val * 1.2)
+    
     ax.legend(frameon=False)
     ax.set_title(naslov, fontsize=12, fontweight='bold', color='#2c3e50')
     
+    plt.tight_layout()
     imgdata = BytesIO()
     fig.savefig(imgdata, format='png', bbox_inches='tight', dpi=150)
     imgdata.seek(0)
@@ -229,7 +240,7 @@ def kreiraj_grafikon_status(df_sub, naslov):
     return imgdata
 
 def kreiraj_grafikon_vreme_dostave(df_sub, naslov):
-    """Kreira Bar Chart sa prosečnim vremenom dostave"""
+    """Kreira popravljen Bar Chart sa prosečnim vremenom dostave"""
     wolt_df = df_sub[(df_sub["Platforma"] == "Wolt") & (df_sub["Vreme_Broj"].notna())]
     glovo_df = df_sub[(df_sub["Platforma"] == "Glovo") & (df_sub["Vreme_Broj"].notna())]
     
@@ -240,22 +251,40 @@ def kreiraj_grafikon_vreme_dostave(df_sub, naslov):
     prikazi_wolt = "Wolt" in df_sub["Platforma"].values or df_sub.empty
     prikazi_glovo = "Glovo" in df_sub["Platforma"].values or df_sub.empty
     
+    # Fiksne koordinate X ose da bi proporcije bile identične grafikonu levo
     if prikazi_wolt and prikazi_glovo:
-        bars = ax.bar(['Wolt', 'Glovo'], [w_avg, g_avg], color=['#00c2e8', '#ffc244'], width=0.5)
+        bars = ax.bar([0.2, 0.8], [w_avg, g_avg], color=['#00c2e8', '#ffc244'], width=0.35)
+        ax.set_xticks([0.2, 0.8])
+        ax.set_xticklabels(['Wolt', 'Glovo'])
+        ax.set_xlim(-0.2, 1.2)
+        bar_list = [w_avg, g_avg]
+        pos_list = [0.2, 0.8]
     elif prikazi_wolt:
-        bars = ax.bar(['Wolt'], [w_avg], color=['#00c2e8'], width=0.5)
+        bars = ax.bar([0.5], [w_avg], color=['#00c2e8'], width=0.35)
+        ax.set_xticks([0.5])
+        ax.set_xticklabels(['Wolt'])
+        ax.set_xlim(0, 1)
+        bar_list = [w_avg]
+        pos_list = [0.5]
     elif prikazi_glovo:
-        bars = ax.bar(['Glovo'], [g_avg], color=['#ffc244'], width=0.5)
+        bars = ax.bar([0.5], [g_avg], color=['#ffc244'], width=0.35)
+        ax.set_xticks([0.5])
+        ax.set_xticklabels(['Glovo'])
+        ax.set_xlim(0, 1)
+        bar_list = [g_avg]
+        pos_list = [0.5]
         
     ax.set_ylabel('Prosečno vreme (min)', fontsize=11, fontweight='bold')
     ax.set_title(naslov, fontsize=12, fontweight='bold', color='#2c3e50')
     
-    # Upisivanje brojeva iznad kolona
-    bar_list = [w_avg, g_avg] if prikazi_wolt and prikazi_glovo else ([w_avg] if prikazi_wolt else [g_avg])
-    for i, v in enumerate(bar_list):
+    for i, v in zip(pos_list, bar_list):
         if v > 0:
             ax.text(i, v + 0.5, f"{v:.1f} min", ha='center', va='bottom', fontweight='bold', color='#2c3e50')
             
+    max_v = max(bar_list) if max(bar_list) > 0 else 10
+    ax.set_ylim(0, max_v * 1.2)
+    
+    plt.tight_layout()
     imgdata = BytesIO()
     fig.savefig(imgdata, format='png', bbox_inches='tight', dpi=150)
     imgdata.seek(0)
@@ -291,38 +320,38 @@ def analiziraj_status(text):
 def izvuci_ocenu(tekst, plat):
     try:
         if not tekst: return "-"
-        tekst_lower = tekst.lower()
+        cist_tekst = re.sub(r'<[^>]+>', ' ', tekst).lower()
+        
         ocena = None
         if plat == "Glovo":
-            procenti = re.findall(r'(\d{1,3})\s*%', tekst_lower)
+            procenti = re.findall(r'(\d{1,3})\s*%', cist_tekst)
             for p in procenti:
                 if int(p) >= 60:
                     ocena = p + "%"
                     break
         elif plat == "Wolt":
-            match = re.search(r'\b([5-9][.,][0-9]|10[.,]0)\b', tekst_lower)
+            match = re.search(r'\b([5-9][.,][0-9]|10[.,]0)\b', cist_tekst)
             if match: 
                 ocena = match.group(1).replace(',', '.')
+                
         if ocena: return ocena
-        if re.search(r'\b(novo|new)\b', tekst_lower): return "Novo"
+        if re.search(r'\b(novo|new)\b', cist_tekst): return "Novo"
         return "-"
     except: return "-"
 
 def izvuci_vreme_dostave(tekst):
-    """Nova funkcija za prepoznavanje vremena dostave i vracanje proseka za grafikon"""
+    """Izvlači vreme tako što prvo obriše sve HTML tagove da se brojevi normalno spoje"""
     try:
         if not tekst: return "-", np.nan
-        t_lower = tekst.lower()
+        cist_tekst = re.sub(r'<[^>]+>', ' ', tekst).lower()
         
-        # Traži formate poput "15-20 min" ili "15–20'"
-        match = re.search(r'(\d{1,3})\s*[-–]\s*(\d{1,3})\s*(?:min|\')', t_lower)
+        match = re.search(r'(\d{1,3})\s*[-–]\s*(\d{1,3})\s*(?:min|m|\')', cist_tekst)
         if match:
             v1, v2 = int(match.group(1)), int(match.group(2))
             if v1 < 120 and v2 < 120:
                 return f"{v1}-{v2} min", (v1 + v2) / 2.0
                 
-        # Traži fiksne formate poput "25 min" ili "25'"
-        match_single = re.search(r'\b(\d{1,3})\s*(?:min|\')', t_lower)
+        match_single = re.search(r'\b(\d{1,3})\s*(?:min|m|\')', cist_tekst)
         if match_single:
             v = int(match_single.group(1))
             if v < 120:
@@ -375,7 +404,7 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
                 "Ocena": ocena,
                 "Vreme dostave": vreme_str,
                 "Status": analiziraj_status(sve_z),
-                "Vreme_Broj": vreme_num, # Skrivena kolona za potrebe grafikona
+                "Vreme_Broj": vreme_num, 
                 "Link": link
             }
 
@@ -644,12 +673,19 @@ if st.session_state.pokrenuto:
 
     df = st.session_state.df_sve
     if not df.empty:
+        # OSIGURAČ MEMORIJE - Popunjava kolone ako fale zbog starog keša
+        if "Vreme_Broj" not in df.columns: df["Vreme_Broj"] = np.nan
+        if "Vreme dostave" not in df.columns: df["Vreme dostave"] = "-"
+        if "Ocena" not in df.columns: df["Ocena"] = "-"
+        if "Link" not in df.columns: df["Link"] = "-"
+
         st.success(f"✅ Osveženo u: {datetime.datetime.fromtimestamp(st.session_state.last_run).strftime('%H:%M:%S')}")
         
         st.subheader("📊 Interaktivni Grafikoni i Istorijat")
         
         g1, g2 = st.columns(2)
         
+        # PAMETNI DEFAULT FILTER ZA ADRESU
         adrese_un = list(df["Adresa"].unique())
         opcije_a = ["Sve adrese"] + adrese_un
         def_idx = 1 if len(adrese_un) == 1 else 0
@@ -793,6 +829,7 @@ if st.session_state.pokrenuto:
         time.sleep(1)
         st.rerun()
     else:
+        # Automatski obara rerun kada istekne tajmer (okida novo skeniranje)
         st.rerun()
 else: 
     st.info("Sistem zaustavljen. Unesite parametre u meniju sa leve strane i kliknite 'Pokreni'.")
