@@ -72,16 +72,57 @@ def analiziraj_status(tekst):
     if not tekst: return "Otvoreno"
     t = tekst.lower()
     
-    # Ključne riječi koje znače da dostava NE RADI (iako je pickup možda otvoren)
     zatvoreno_indikatori = [
         "samo preuzimanje", "samo za preuzimanje", "pickup only", 
         "dostava nije dostupna", "dostava trenutno nije", "samo licno preuzimanje",
-        "zatvoreno", "zakazite", "zakazi", "nedostupno", "otvara se", "otvara"
+        "zatvoreno", "zakažite", "zakaži", "zakazi", "nedostupno", "otvara se", "otvara", "closed", "schedule"
     ]
     
     if any(k in t for k in zatvoreno_indikatori):
         return "Zatvoreno"
     return "Otvoreno"
+
+# ---------------- POMOĆNE ZA EKSTRAKCIJU ----------------
+def izvuci_ocenu(tekst, plat):
+    try:
+        if not tekst: return "-"
+        cist = re.sub(r'<[^>]+>', ' ', tekst).lower()
+        if plat == "Glovo":
+            p = re.findall(r'(\d{1,3})\s*%', cist)
+            for x in p:
+                if int(x) >= 60: return x + "%"
+        elif plat == "Wolt":
+            m = re.search(r'\b([5-9][.,][0-9]|10[.,]0)\b', cist)
+            if m: return m.group(1).replace(',', '.')
+        if re.search(r'\b(novo|new)\b', cist): return "Novo"
+        return "-"
+    except: return "-"
+
+def izvuci_vreme(tekst):
+    try:
+        if not tekst: return "-", np.nan
+        cist = re.sub(r'<[^>]+>', ' ', tekst).lower()
+        m = re.search(r'(\d{1,3})\s*[-–]\s*(\d{1,3})\s*(?:min|m|\')', cist)
+        if m: return f"{m.group(1)}-{m.group(2)} min", (int(m.group(1)) + int(m.group(2))) / 2.0
+        m2 = re.search(r'\b(\d{1,3})\s*(?:min|m|\')', cist)
+        if m2: return f"{m2.group(1)} min", float(m2.group(1))
+        return "-", np.nan
+    except: return "-", np.nan
+
+def normalizuj_ime(ime): return re.sub(r'[^\w]', '', ime.lower())
+
+def izvuci_ime(tekst):
+    if not tekst: return ""
+    lines = tekst.split('\n')
+    for line in lines:
+        line = line.strip()
+        if not line or '%' in line: continue
+        line_lower = line.lower()
+        if "min" in line_lower and re.search(r'\d+', line_lower): continue
+        if "rsd" in line_lower or "din" in line_lower: continue
+        if any(x in line_lower for x in ["promo", "novo", "odlično", "besplatna dostava", "artikli", "narudžb", "narudzb", "popust"]): continue
+        if len(line) >= 2: return line
+    return ""
 
 # ---------------- MATPLOTLIB GRAFIKONI (STABILNA VERZIJA) ----------------
 def kreiraj_grafikon_status(df_sub, naslov):
@@ -140,93 +181,142 @@ def kreiraj_timeline_grafikon(df_hist, adresa=None, custom_naslov=None, is_pdf=F
     plt.tight_layout()
     imgdata = BytesIO(); fig.savefig(imgdata, format='png'); plt.close(fig); return imgdata
 
-# ---------------- POMOĆNE ZA EKSTRAKCIJU ----------------
-def izvuci_ocenu(tekst, plat):
-    try:
-        if not tekst: return "-"
-        cist = re.sub(r'<[^>]+>', ' ', tekst).lower()
-        if plat == "Glovo":
-            p = re.findall(r'(\d{1,3})\s*%', cist)
-            for x in p:
-                if int(x) >= 60: return x + "%"
-        elif plat == "Wolt":
-            m = re.search(r'\b([5-9][.,][0-9]|10[.,]0)\b', cist)
-            if m: return m.group(1).replace(',', '.')
-        if re.search(r'\b(novo|new)\b', cist): return "Novo"
-        return "-"
-    except: return "-"
+# ---------------- PAMETNO SKROLOVANJE ----------------
+async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
+    results_dict = {}
+    prethodni_broj = 0; pokusaji = 0
+    while True:
+        if plat == "Wolt":
+            podaci = await page.evaluate('''() => {
+                let rez = [];
+                document.querySelectorAll("a[data-test-id^='venueCard.']").forEach(c => {
+                    let link = c.href; let text = c.innerText; let p = c.closest("li");
+                    let html = p ? p.innerHTML : c.innerHTML; rez.push({link, text, html});
+                });
+                return rez;
+            }''')
+        else:
+            podaci = await page.evaluate('''() => {
+                let rez = [];
+                document.querySelectorAll("a:has(h3), a[data-testid='store-card'], .store-card a").forEach(c => {
+                    let link = c.href;
+                    if (!link.includes('/dostava') && !link.includes('/category')) { rez.push({link: link, text: c.innerText, html: ""}); }
+                });
+                return rez;
+            }''')
 
-def izvuci_vreme(tekst):
-    try:
-        if not tekst: return "-", np.nan
-        cist = re.sub(r'<[^>]+>', ' ', tekst).lower()
-        m = re.search(r'(\d{1,3})\s*[-–]\s*(\d{1,3})\s*(?:min|m|\')', cist)
-        if m: return f"{m.group(1)}-{m.group(2)} min", (int(m.group(1)) + int(m.group(2))) / 2.0
-        m2 = re.search(r'\b(\d{1,3})\s*(?:min|m|\')', cist)
-        if m2: return f"{m2.group(1)} min", float(m2.group(1))
-        return "-", np.nan
-    except: return "-", np.nan
+        for item in podaci:
+            link = item['link']
+            if not link or link in results_dict: continue
+            text = item['text']
+            sve_z = text + " " + item['html'] if plat == "Wolt" else text
+            ime = ukloni_kvacice(izvuci_ime(text))
+            if len(ime) < 2: continue
+            
+            ocena = izvuci_ocenu(sve_z, plat)
+            vreme_str, vreme_num = izvuci_vreme(sve_z)
+            
+            results_dict[link] = {
+                "Adresa": address, 
+                "Platforma": plat, 
+                "Naziv": ime, 
+                "Ocena": ocena,
+                "Vreme dostave": vreme_str,
+                "Status": analiziraj_status(sve_z),
+                "Vreme_Broj": vreme_num, 
+                "Link": link
+            }
 
-# ---------------- SCRAPERS ----------------
-async def scrape_wolt(browser, adr, log_ph):
+        trenutni = len(results_dict)
+        if trenutni > prethodni_broj:
+            log_msg(f"[{plat.upper()} - {address}] Učitano {trenutni} restorana...", log_ph)
+            prethodni_broj = trenutni; pokusaji = 0
+        
+        await page.evaluate("window.scrollBy(0, window.innerHeight);")
+        await asyncio.sleep(0.8)
+        
+        h = await page.evaluate("document.body.scrollHeight")
+        s = await page.evaluate("window.scrollY + window.innerHeight")
+        if s >= h - 100:
+            pokusaji += 1
+            await asyncio.sleep(1.5)
+            if pokusaji >= 5: break
+        else: pokusaji = 0
+    return list(results_dict.values())
+
+# ---------------- SCRAPERS (VRAĆENA ORIGINALNA LOGIKA) ----------------
+async def scrape_wolt(browser, address, log_ph=None):
     try:
-        ctx = await browser.new_context(permissions=['geolocation']); page = await ctx.new_page(); await page.goto("https://wolt.com/sr/srb")
+        context = await browser.new_context(permissions=['geolocation'])
+        page = await context.new_page()
+        await page.goto("https://wolt.com/sr/srb")
         try: await page.locator("[data-test-id='allow-button']").click(timeout=3000)
         except: pass
-        f = page.get_by_role("combobox"); await f.click(); await f.fill(adr); await asyncio.sleep(2); await page.keyboard.press("ArrowDown"); await page.keyboard.press("Enter")
-        await asyncio.sleep(5); await page.goto("https://wolt.com/sr/discovery/restaurants")
+        input_f = page.get_by_role("combobox")
+        await input_f.click()
+        await input_f.fill(address)
+        await asyncio.sleep(2)
+        await page.keyboard.press("ArrowDown")
+        await page.keyboard.press("Enter")
+        await asyncio.sleep(5)
+        await page.goto("https://wolt.com/sr/discovery/restaurants")
         try: await page.wait_for_selector("a[data-test-id^='venueCard.']", timeout=10000)
         except: return []
-        rez = []
-        podaci = await page.evaluate('''() => {
-            let items = [];
-            document.querySelectorAll("a[data-test-id^='venueCard.']").forEach(c => {
-                let p = c.closest("li");
-                items.push({link: c.href, text: c.innerText, html: p ? p.innerHTML : ""});
-            });
-            return items;
-        }''')
-        for item in podaci:
-            sve_z = item['text'] + " " + item['html']
-            ime = cirilica_u_latinicu(item['text'].split('\n')[0])
-            ocena = izvuci_ocenu(sve_z, "Wolt")
-            v_str, v_num = izvuci_vreme(sve_z)
-            status = analiziraj_status(sve_z)
-            rez.append({"Adresa": adr, "Platforma": "Wolt", "Naziv": ime, "Ocena": ocena, "Vreme dostave": v_str, "Status": status, "Vreme_Broj": v_num, "Link": item['link']})
-        await ctx.close(); return rez
-    except: return []
 
-async def scrape_glovo(browser, adr, log_ph):
+        rezultati = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", address, log_ph)
+        await context.close()
+        return rezultati
+    except Exception as e: 
+        log_msg(f"[WOLT GREŠKA] {e}", log_ph)
+        return []
+
+async def scrape_glovo(browser, address, log_ph=None):
     try:
-        ctx = await browser.new_context(permissions=['geolocation']); page = await ctx.new_page(); await page.goto("https://glovoapp.com/sr/rs")
+        context = await browser.new_context(permissions=['geolocation'])
+        page = await context.new_page()
+        await page.goto("https://glovoapp.com/sr/rs")
         try: await page.get_by_role("button", name=re.compile("Accept|Prihvati", re.I)).click(timeout=3000)
         except: pass
-        await page.locator("#hero-container-input").click(); s = page.get_by_role("searchbox"); await s.fill(adr)
-        try: d = page.locator("div[data-actionable='true'][role='button']").first; await d.wait_for(state="visible", timeout=8000); await d.click()
+        await page.locator("#hero-container-input").click()
+        search = page.get_by_role("searchbox")
+        await search.fill(address)
+        try:
+            dropdown_item = page.locator("div[data-actionable='true'][role='button']").first
+            await dropdown_item.wait_for(state="visible", timeout=8000)
+            await dropdown_item.click()
         except: await page.keyboard.press("Enter")
-        await asyncio.sleep(6); 
-        try: k = page.get_by_role("link", name=re.compile(r"Restorani|Hrana", re.I)).first; await k.wait_for(state="visible", timeout=7000); await k.click()
+        try:
+            btn_drugo = page.locator("button:has-text('Drugo')")
+            await btn_drugo.wait_for(state="visible", timeout=4000)
+            await btn_drugo.click()
+        except: pass
+        try:
+            btn_potvrdi = page.locator("button:has-text('Potvrdi adresu')")
+            await btn_potvrdi.wait_for(state="visible", timeout=4000)
+            await btn_potvrdi.click()
         except: pass
         await asyncio.sleep(5)
-        rez = []
-        podaci = await page.evaluate('''() => {
-            let items = [];
-            document.querySelectorAll("a:has(h3), a[data-testid='store-card']").forEach(c => {
-                items.push({link: c.href, text: c.innerText, html: c.innerHTML});
-            });
-            return items;
-        }''')
-        for item in podaci:
-            sve_z = item['text'] + " " + item['html']
-            ime = cirilica_u_latinicu(item['text'].split('\n')[0])
-            ocena = izvuci_ocenu(sve_z, "Glovo")
-            v_str, v_num = izvuci_vreme(sve_z)
-            status = analiziraj_status(sve_z)
-            rez.append({"Adresa": adr, "Platforma": "Glovo", "Naziv": ime, "Ocena": ocena, "Vreme dostave": v_str, "Status": status, "Vreme_Broj": v_num, "Link": item['link']})
-        await ctx.close(); return rez
-    except: return []
+        try:
+            btn_pocetna = page.locator("text='Idi na početnu stranicu'")
+            if await btn_pocetna.count() > 0 and await btn_pocetna.first.is_visible(timeout=3000):
+                await btn_pocetna.first.click()
+                await asyncio.sleep(5) 
+        except: pass
+        try:
+            kat_link = page.get_by_role("link", name=re.compile(r"Restorani|Hrana", re.I)).first
+            await kat_link.wait_for(state="visible", timeout=7000)
+            await kat_link.click()
+        except: pass
+        await asyncio.sleep(5)
 
-# ---------------- PROCES ----------------
+        rezultati = await pametno_skrolovanje_i_ekstrakcija(page, "Glovo", address, log_ph)
+        await context.close()
+        return rezultati
+    except Exception as e: 
+        log_msg(f"[GLOVO GREŠKA] {e}", log_ph)
+        return []
+
+# ---------------- PROCES SKENIRANJA ----------------
 async def proces_skeniranja(adrese, log_ph):
     sve = []
     async with async_playwright() as p:
@@ -250,31 +340,40 @@ async def proces_skeniranja(adrese, log_ph):
         df_h.to_csv(HISTORY_FILE, index=False); return df, df_h
     return pd.DataFrame(), pd.DataFrame()
 
-# ================= UI =================
+# ================= STREAMLIT UI =================
+if 'pokrenuto' not in st.session_state: st.session_state.pokrenuto = False
 if 'last_run' not in st.session_state: st.session_state.last_run = 0
 if 'df_sve' not in st.session_state: st.session_state.df_sve = pd.DataFrame()
 if 'df_history' not in st.session_state: st.session_state.df_history = pd.read_csv(HISTORY_FILE) if os.path.exists(HISTORY_FILE) else pd.DataFrame()
-if 'pokrenuto' not in st.session_state: st.session_state.pokrenuto = False
 
 st.title("🍔 Nadzor Dostave (Wolt & Glovo)")
 
 with st.sidebar:
     st.header("⚙️ Podešavanja")
-    adrese_input = st.text_area("📍 Adrese:", placeholder="Primer:\nMakenzijeva 57, Beograd")
+    adrese_input = st.text_area("📍 Adrese:", value="", placeholder="Primer:\nMakenzijeva 57, Beograd")
     sleep_interval = st.number_input("⏱️ Interval (min):", min_value=1, value=15)
+    
+    # STATICNI TAJMER
     timer_ph = st.empty()
+    
     st.markdown("---")
-    if st.button("▶️ Pokreni", type="primary"): st.session_state.pokrenuto = True; st.session_state.last_run = 0; st.rerun()
-    if st.button("⏹️ Zaustavi"): st.session_state.pokrenuto = False; st.rerun()
-    if st.button("🗑️ Obriši istoriju"): 
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("▶️ Pokreni", type="primary"): st.session_state.pokrenuto = True; st.session_state.last_run = 0; st.rerun()
+    with c2:
+        if st.button("⏹️ Zaustavi"): st.session_state.pokrenuto = False; st.rerun()
+    
+    st.markdown("---")
+    if st.button("🗑️ Obriši istoriju"):
         if os.path.exists(HISTORY_FILE): os.remove(HISTORY_FILE)
         st.session_state.df_history = pd.DataFrame(); st.rerun()
 
 if st.session_state.pokrenuto:
     lista_adresa = [cirilica_u_latinicu(a.strip()) for a in adrese_input.split('\n') if a.strip()]
-    if not lista_adresa: st.warning("Unesite adrese!"); st.stop()
+    if not lista_adresa: st.warning("Unesite adresu!"); st.session_state.pokrenuto = False; st.stop()
 
-    if time.time() - st.session_state.last_run >= sleep_interval * 60:
+    now = time.time()
+    if now - st.session_state.last_run >= sleep_interval * 60:
         sl = st.empty()
         with st.spinner("Skeniranje..."):
             df, hi = asyncio.run(proces_skeniranja(lista_adresa, sl))
@@ -287,9 +386,9 @@ if st.session_state.pokrenuto:
         for col in ["Vreme_Broj", "Vreme dostave", "Ocena", "Link"]:
             if col not in df.columns: df[col] = np.nan if "Broj" in col else "-"
 
-        st.success(f"✅ Osveženo u: {datetime.datetime.fromtimestamp(st.session_state.last_run).strftime('%H:%M:%S')}")
+        st.success(f"✅ Poslednje osvežavanje: {datetime.datetime.fromtimestamp(st.session_state.last_run).strftime('%H:%M:%S')}")
 
-        # --- 1. TABELA NA VRHU (KAKO SI TRAŽIO) ---
+        # --- 1. TABELA NA VRHU ---
         st.subheader("📊 Rezime Skeniranja")
         rez_data = []
         for adr in df["Adresa"].unique():
@@ -298,10 +397,11 @@ if st.session_state.pokrenuto:
                 if not sub.empty:
                     rez_data.append({"Adresa": adr, "Platforma": p, "Ukupno": len(sub), "Otvoreno": len(sub[sub["Status"]=="Otvoreno"]), "Zatvoreno": len(sub[sub["Status"]=="Zatvoreno"])})
         st.table(pd.DataFrame(rez_data))
-
+        
         # --- 2. GRAFIKONI ---
+        st.markdown("---")
         adrese_un = list(df["Adresa"].unique())
-        graf_adr = st.selectbox("📍 Filtriraj po Adresi:", ["Sve adrese"] + adrese_un, index=1 if len(adrese_un)==1 else 0)
+        graf_adr = st.selectbox("📍 Filtriraj Grafikone po Adresi:", ["Sve adrese"] + adrese_un, index=1 if len(adrese_un)==1 else 0)
         c_df = df if graf_adr == "Sve adrese" else df[df["Adresa"] == graf_adr]
         
         col1, col2 = st.columns(2)
@@ -316,8 +416,7 @@ if st.session_state.pokrenuto:
         # --- 3. UPOREDNI PRIKAZ ---
         st.markdown("---")
         st.subheader("⚖️ Uporedni Prikaz (Restorani na obe platforme)")
-        def normal_ime(ime): return re.sub(r'[^\w]', '', ime.lower())
-        df['Naziv_Norm'] = df['Naziv'].apply(normal_ime)
+        df['Naziv_Norm'] = df['Naziv'].apply(normalizuj_ime)
         uporedni = []
         for adr in df['Adresa'].unique():
             df_a = df[df['Adresa'] == adr]
@@ -328,10 +427,15 @@ if st.session_state.pokrenuto:
                 uporedni.append({"Adresa": adr, "Restoran": w['Naziv'], "Status Wolt": w['Status'], "Vreme Wolt": w['Vreme dostave'], "Status Glovo": g['Status'], "Vreme Glovo": g['Vreme dostave']})
         if uporedni: st.dataframe(pd.DataFrame(uporedni), use_container_width=True, hide_index=True)
 
-        # --- 4. LISTA ---
+        # --- 4. DETALJNA LISTA ---
         st.markdown("---")
         st.subheader("🔍 Detaljna Lista")
-        st.dataframe(c_df.drop(columns=['Naziv_Norm', 'Vreme_Broj'], errors='ignore').style.map(lambda v: f'color: {"#27ae60" if v=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status']), use_container_width=True, hide_index=True)
+        f1, f2, f3 = st.columns(3)
+        with f1: fa = st.multiselect("📍 Adresa", df["Adresa"].unique(), df["Adresa"].unique())
+        with f2: fp = st.multiselect("📱 Platforma", df["Platforma"].unique(), df["Platforma"].unique())
+        with f3: fs = st.multiselect("🚦 Status", ["Otvoreno", "Zatvoreno"], ["Otvoreno", "Zatvoreno"])
+        f_df = df[(df["Adresa"].isin(fa)) & (df["Platforma"].isin(fp)) & (df["Status"].isin(fs))]
+        st.dataframe(f_df.drop(columns=['Naziv_Norm', 'Vreme_Broj'], errors='ignore').style.map(lambda v: f'color: {"#27ae60" if v=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status']), use_container_width=True, hide_index=True, column_config={"Link": st.column_config.LinkColumn("Link", display_text="Otvori na sajtu")})
 
     # TAJMER
     rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
@@ -339,6 +443,3 @@ if st.session_state.pokrenuto:
         mins, secs = divmod(rem, 60)
         timer_ph.metric("Sledeće skeniranje", f"{mins:02d}:{secs:02d}")
         time.sleep(1); st.rerun()
-    else: st.rerun()
-else:
-    st.info("Sistem ugašen. Unesite adrese i kliknite Pokreni.")
