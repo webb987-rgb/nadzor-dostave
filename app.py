@@ -9,7 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from io import BytesIO
 from pathlib import Path
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 import time
 import streamlit as st
 import sys
@@ -49,6 +49,10 @@ LOZINKA_POSILJAOCA = "sdehqzbnqefjlomo"
 OUTPUT_DIR = Path.cwd() / "izvestaji"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_FILE = OUTPUT_DIR / "istorija_dostave.csv"
+
+# NOVA FASCIKLA ZA SLIKE GREŠAKA
+ERRORS_DIR = Path.cwd() / "greske"
+ERRORS_DIR.mkdir(parents=True, exist_ok=True)
 # ========================================================
 
 def timestamp():
@@ -369,12 +373,13 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
         else: pokusaji = 0
     return list(results_dict.values())
 
-# ---------------- SCRAPERS (TOTALNA AMNEZIJA) ----------------
-async def scrape_wolt(context_wolt, address, log_ph=None):
+# ---------------- SCRAPERS (SA SLIKANJEM GREŠAKA) ----------------
+async def scrape_wolt(context_wolt, address, log_ph=None, error_screenshots=None):
+    page = None
     try:
         page = await context_wolt.new_page()
+        page.set_default_timeout(10000)
         
-        # Odlazak i brisanje memorije za svaki slucaj
         await page.goto("https://wolt.com/sr/srb")
         try:
             await page.evaluate("window.localStorage.clear(); window.sessionStorage.clear();")
@@ -384,35 +389,51 @@ async def scrape_wolt(context_wolt, address, log_ph=None):
         try: await page.locator("[data-test-id='allow-button']").click(timeout=3000)
         except: pass
         
-        input_f = page.get_by_role("combobox")
-        await input_f.click(timeout=8000)
-        await input_f.fill(address)
-        await asyncio.sleep(2)
-        await page.keyboard.press("ArrowDown")
-        await page.keyboard.press("Enter")
-        await asyncio.sleep(5)
-        await page.goto("https://wolt.com/sr/discovery/restaurants")
-        try: await page.wait_for_selector("a[data-test-id^='venueCard.']", timeout=10000)
-        except: pass
-        
-        rez = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", address, log_ph)
-        await page.close()
-        return rez
+        try:
+            input_f = page.get_by_role("combobox")
+            await input_f.wait_for(state="visible", timeout=5000)
+            await input_f.click(timeout=3000)
+            await input_f.fill(address)
+            await asyncio.sleep(2)
+            await page.keyboard.press("ArrowDown")
+            await page.keyboard.press("Enter")
+            await asyncio.sleep(5)
+            await page.goto("https://wolt.com/sr/discovery/restaurants")
+            try: await page.wait_for_selector("a[data-test-id^='venueCard.']", timeout=8000)
+            except PlaywrightTimeoutError: pass
+            
+            rez = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", address, log_ph)
+            return rez
+        except PlaywrightTimeoutError:
+            log_msg(f"[WOLT TIMEOUT] Odustajem od adrese {address} zbog sporog učitavanja.", log_ph)
+            if page and error_screenshots is not None:
+                try:
+                    err_path = str(ERRORS_DIR / f"Wolt_Timeout_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
+                    await page.screenshot(path=err_path)
+                    error_screenshots.append(err_path)
+                except: pass
+            return []
     except Exception as e: 
         log_msg(f"[WOLT GREŠKA] {e}", log_ph)
+        if page and error_screenshots is not None:
+            try:
+                err_path = str(ERRORS_DIR / f"Wolt_Error_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
+                await page.screenshot(path=err_path)
+                error_screenshots.append(err_path)
+            except: pass
         return []
+    finally:
+        if page: await page.close()
 
-async def scrape_glovo(context_glovo, address, log_ph=None):
+async def scrape_glovo(context_glovo, address, log_ph=None, error_screenshots=None):
+    page = None
     try:
-        # Brisemo cookies sesije pre otvaranja taba
         await context_glovo.clear_cookies()
         page = await context_glovo.new_page()
+        page.set_default_timeout(10000)
         
         await page.goto("https://glovoapp.com/sr/rs", wait_until="domcontentloaded")
-        
-        # TOTALNA AMNEZIJA: Brisemo Local Storage, Session Storage i skriveni IndexedDB
         try:
-            log_msg(f"[GLOVO] Brisanje memorije pretraživača za {address}...", log_ph)
             await page.evaluate("""
                 window.localStorage.clear();
                 window.sessionStorage.clear();
@@ -421,35 +442,57 @@ async def scrape_glovo(context_glovo, address, log_ph=None):
                 });
             """)
             await asyncio.sleep(1)
-            # Osvžavamo čist sajt
             await page.goto("https://glovoapp.com/sr/rs", wait_until="domcontentloaded")
         except: pass
         
         try: await page.get_by_role("button", name=re.compile("Accept|Prihvati", re.I)).click(timeout=3000)
         except: pass
         
-        # Sada apsolutno MORA biti na početnoj i imati ovo polje
-        await page.locator("#hero-container-input").click(timeout=10000)
-        search = page.get_by_role("searchbox")
-        await search.fill(address)
-        
+        try:
+            hero_input = page.locator("#hero-container-input")
+            await hero_input.wait_for(state="visible", timeout=6000)
+            await hero_input.click()
+            search = page.get_by_role("searchbox")
+            await search.fill(address)
+        except PlaywrightTimeoutError:
+            log_msg(f"[GLOVO TIMEOUT] Prvo polje nije nađeno, prelazim na Fallback za {address}", log_ph)
+            try:
+                header_btn = page.locator('header div[role="button"]').first
+                await header_btn.wait_for(state="visible", timeout=5000)
+                await header_btn.click()
+                await asyncio.sleep(2)
+                search_modal = page.get_by_role("searchbox").last
+                await search_modal.wait_for(state="visible", timeout=5000)
+                await search_modal.click()
+                await search_modal.fill(address)
+            except PlaywrightTimeoutError:
+                log_msg(f"[GLOVO ODUSTAJEM] Adresa {address} je zablokirana (Anti-bot štit). Slikam ekran...", log_ph)
+                if page and error_screenshots is not None:
+                    try:
+                        err_path = str(ERRORS_DIR / f"Glovo_Blokada_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
+                        await page.screenshot(path=err_path)
+                        error_screenshots.append(err_path)
+                    except: pass
+                return []
+
         try:
             dropdown_item = page.locator("div[data-actionable='true'][role='button']").first
             await dropdown_item.wait_for(state="visible", timeout=8000)
             await dropdown_item.click()
-        except: await page.keyboard.press("Enter")
+        except PlaywrightTimeoutError: 
+            await page.keyboard.press("Enter")
         
         try:
             btn_drugo = page.locator("button:has-text('Drugo')")
-            await btn_drugo.wait_for(state="visible", timeout=4000)
+            await btn_drugo.wait_for(state="visible", timeout=3000)
             await btn_drugo.click()
-        except: pass
+        except PlaywrightTimeoutError: pass
         
         try:
             btn_potvrdi = page.locator("button:has-text('Potvrdi adresu')")
-            await btn_potvrdi.wait_for(state="visible", timeout=4000)
+            await btn_potvrdi.wait_for(state="visible", timeout=3000)
             await btn_potvrdi.click()
-        except: pass
+        except PlaywrightTimeoutError: pass
         
         await asyncio.sleep(5)
         try:
@@ -461,19 +504,27 @@ async def scrape_glovo(context_glovo, address, log_ph=None):
         
         try:
             kat_link = page.get_by_role("link", name=re.compile(r"Restorani|Hrana", re.I)).first
-            await kat_link.wait_for(state="visible", timeout=7000)
+            await kat_link.wait_for(state="visible", timeout=5000)
             await kat_link.click()
-        except: pass
+        except PlaywrightTimeoutError: pass
         
         await asyncio.sleep(5)
+        page.set_default_timeout(60000) 
         rez = await pametno_skrolovanje_i_ekstrakcija(page, "Glovo", address, log_ph)
-        await page.close()
         return rez
     except Exception as e: 
         log_msg(f"[GLOVO GREŠKA] {e}", log_ph)
+        if page and error_screenshots is not None:
+            try:
+                err_path = str(ERRORS_DIR / f"Glovo_Error_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
+                await page.screenshot(path=err_path)
+                error_screenshots.append(err_path)
+            except: pass
         return []
+    finally:
+        if page: await page.close()
 
-# ---------------- PDF LOGIC (BEZBEDNE PETLJE BEZ LIST COMPREHENSION BAGOVA) ----------------
+# ---------------- PDF LOGIC ----------------
 def format_pdf_stavka(tekst, status, stil):
     boja = "#27ae60" if status == "Otvoreno" else "#e74c3c"
     return Paragraph(f"<font color='{boja}' size=16>&bull;</font> {tekst}", stil)
@@ -564,13 +615,14 @@ def napravi_zbirni_pdf(df, df_hist):
 # ---------------- PROCES SKENIRANJA ----------------
 async def proces_skeniranja(adrese, log_ph):
     sve = []
+    error_screenshots = [] # Lista za cuvanje putanja slika sa greskama
+    
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
             args=["--disable-blink-features=AutomationControlled"]
         ) 
         
-        # Pravimo dve odvojene glavne sesije da se podaci nikako ne pomešaju
         context_wolt = await browser.new_context(
             permissions=['geolocation'],
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -587,8 +639,8 @@ async def proces_skeniranja(adrese, log_ph):
                 
             log_msg(f"\n[SISTEM] Pokrecem skeniranje za: {adr}", log_ph)
             r = await asyncio.gather(
-                scrape_wolt(context_wolt, adr, log_ph), 
-                scrape_glovo(context_glovo, adr, log_ph)
+                scrape_wolt(context_wolt, adr, log_ph, error_screenshots), 
+                scrape_glovo(context_glovo, adr, log_ph, error_screenshots)
             )
             sve.extend(r[0] + r[1])
                 
@@ -610,14 +662,15 @@ async def proces_skeniranja(adrese, log_ph):
             p_fajl = napravi_pdf_za_adresu(df_sub, adr, df_h)
             if p_fajl: pdf_fajlovi.append(p_fajl)
             
-        return df_s, df_h, pdf_fajlovi
-    return pd.DataFrame(), pd.DataFrame(), []
+        return df_s, df_h, pdf_fajlovi, error_screenshots
+    return pd.DataFrame(), pd.DataFrame(), [], error_screenshots
 
 # ================= STREAMLIT UI =================
 if 'pokrenuto' not in st.session_state: st.session_state.pokrenuto = False
 if 'last_run' not in st.session_state: st.session_state.last_run = 0
 if 'df_sve' not in st.session_state: st.session_state.df_sve = pd.DataFrame()
 if 'pdf_fajlovi' not in st.session_state: st.session_state.pdf_fajlovi = []
+if 'error_screenshots' not in st.session_state: st.session_state.error_screenshots = []
 
 if 'df_history' not in st.session_state: 
     if os.path.exists(HISTORY_FILE):
@@ -648,8 +701,8 @@ if st.session_state.pokrenuto:
     if now - st.session_state.last_run >= sleep_interval * 60 or st.session_state.last_run == 0:
         timer_ph.warning("⏳ Skeniranje...")
         sl = st.empty()
-        df, hi, pdf = asyncio.run(proces_skeniranja(lista_adresa, sl))
-        st.session_state.df_sve, st.session_state.df_history, st.session_state.pdf_fajlovi, st.session_state.last_run = df, hi, pdf, time.time()
+        df, hi, pdf, err_imgs = asyncio.run(proces_skeniranja(lista_adresa, sl))
+        st.session_state.df_sve, st.session_state.df_history, st.session_state.pdf_fajlovi, st.session_state.error_screenshots, st.session_state.last_run = df, hi, pdf, err_imgs, time.time()
         sl.empty(); st.rerun()
 
     df = st.session_state.df_sve
@@ -735,6 +788,16 @@ if st.session_state.pokrenuto:
             for i, p in enumerate(st.session_state.pdf_fajlovi):
                 with pc[i % 4]:
                     with open(p, "rb") as f: st.download_button(f"Preuzmi {os.path.basename(p)}", f.read(), os.path.basename(p), "application/pdf", key=f"p_{i}")
+                    
+        # PRIKAZ SLIKA SA GREŠKAMA AKO IH IMA
+        if st.session_state.error_screenshots:
+            st.markdown("---")
+            st.subheader("📸 Zabeležene greške (Screenshots)")
+            st.warning("Prilikom poslednjeg skeniranja sistem je naišao na blokade. Pogledajte slike ekrana ispod:")
+            ec = st.columns(len(st.session_state.error_screenshots))
+            for idx, img_path in enumerate(st.session_state.error_screenshots):
+                with ec[idx % len(ec)]:
+                    st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
 
     rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
     while rem > 0:
