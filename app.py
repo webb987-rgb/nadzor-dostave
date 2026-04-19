@@ -369,13 +369,13 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
         else: pokusaji = 0
     return list(results_dict.values())
 
-# ---------------- SCRAPERS (SA AMNEZIJOM) ----------------
-async def scrape_wolt(context, address, log_ph=None):
+# ---------------- SCRAPERS (TOTALNA AMNEZIJA) ----------------
+async def scrape_wolt(context_wolt, address, log_ph=None):
     try:
-        page = await context.new_page()
-        await page.goto("https://wolt.com/sr/srb")
+        page = await context_wolt.new_page()
         
-        # AMNEZIJA: Brišemo pamćenje o lokaciji
+        # Odlazak i brisanje memorije za svaki slucaj
+        await page.goto("https://wolt.com/sr/srb")
         try:
             await page.evaluate("window.localStorage.clear(); window.sessionStorage.clear();")
             await page.goto("https://wolt.com/sr/srb")
@@ -384,7 +384,6 @@ async def scrape_wolt(context, address, log_ph=None):
         try: await page.locator("[data-test-id='allow-button']").click(timeout=3000)
         except: pass
         
-        # Smanjen timeout na 8s da ne čeka 30s ako pukne
         input_f = page.get_by_role("combobox")
         await input_f.click(timeout=8000)
         await input_f.fill(address)
@@ -403,41 +402,37 @@ async def scrape_wolt(context, address, log_ph=None):
         log_msg(f"[WOLT GREŠKA] {e}", log_ph)
         return []
 
-async def scrape_glovo(context, address, log_ph=None):
+async def scrape_glovo(context_glovo, address, log_ph=None):
     try:
-        page = await context.new_page()
+        # Brisemo cookies sesije pre otvaranja taba
+        await context_glovo.clear_cookies()
+        page = await context_glovo.new_page()
+        
         await page.goto("https://glovoapp.com/sr/rs", wait_until="domcontentloaded")
         
-        # AMNEZIJA: Brišemo pamćenje o staroj lokaciji da bismo dobili početni ekran
+        # TOTALNA AMNEZIJA: Brisemo Local Storage, Session Storage i skriveni IndexedDB
         try:
-            await page.evaluate("window.localStorage.clear(); window.sessionStorage.clear();")
+            log_msg(f"[GLOVO] Brisanje memorije pretraživača za {address}...", log_ph)
+            await page.evaluate("""
+                window.localStorage.clear();
+                window.sessionStorage.clear();
+                indexedDB.databases().then(dbs => {
+                    dbs.forEach(db => indexedDB.deleteDatabase(db.name));
+                });
+            """)
             await asyncio.sleep(1)
+            # Osvžavamo čist sajt
             await page.goto("https://glovoapp.com/sr/rs", wait_until="domcontentloaded")
         except: pass
         
-        try: await page.get_by_role("button", name=re.compile("Accept|Prihvati", re.I)).click(timeout=4000)
+        try: await page.get_by_role("button", name=re.compile("Accept|Prihvati", re.I)).click(timeout=3000)
         except: pass
         
-        # POKUŠAJ 1: Tražimo standardno polje na čistoj početnoj stranici
-        try:
-            await page.locator("#hero-container-input").click(timeout=6000)
-            search = page.get_by_role("searchbox")
-            await search.fill(address)
-        except:
-            # POKUŠAJ 2: Ako je amnezija omanula, klikćemo adresu gore levo u zaglavlju (Header)
-            log_msg(f"[GLOVO] Pokušaj unosa preko Headera za {address}", log_ph)
-            try:
-                header_btn = page.locator('header div[role="button"]').first
-                await header_btn.click(timeout=5000)
-                await asyncio.sleep(2)
-                search_modal = page.get_by_role("searchbox").last
-                await search_modal.click(timeout=5000)
-                await search_modal.fill(address)
-            except Exception as e:
-                log_msg(f"[GLOVO ODUSTAJEM] Ne mogu naći polje za adresu: {e}", log_ph)
-                await page.close()
-                return []
-
+        # Sada apsolutno MORA biti na početnoj i imati ovo polje
+        await page.locator("#hero-container-input").click(timeout=10000)
+        search = page.get_by_role("searchbox")
+        await search.fill(address)
+        
         try:
             dropdown_item = page.locator("div[data-actionable='true'][role='button']").first
             await dropdown_item.wait_for(state="visible", timeout=8000)
@@ -478,7 +473,7 @@ async def scrape_glovo(context, address, log_ph=None):
         log_msg(f"[GLOVO GREŠKA] {e}", log_ph)
         return []
 
-# ---------------- PDF LOGIC ----------------
+# ---------------- PDF LOGIC (BEZBEDNE PETLJE BEZ LIST COMPREHENSION BAGOVA) ----------------
 def format_pdf_stavka(tekst, status, stil):
     boja = "#27ae60" if status == "Otvoreno" else "#e74c3c"
     return Paragraph(f"<font color='{boja}' size=16>&bull;</font> {tekst}", stil)
@@ -575,25 +570,30 @@ async def proces_skeniranja(adrese, log_ph):
             args=["--disable-blink-features=AutomationControlled"]
         ) 
         
-        # JEDNA SESIJA ZA SVE ADRESE (DELI CLOUDFLARE COOKIES)
-        context = await browser.new_context(
+        # Pravimo dve odvojene glavne sesije da se podaci nikako ne pomešaju
+        context_wolt = await browser.new_context(
+            permissions=['geolocation'],
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        context_glovo = await browser.new_context(
             permissions=['geolocation'],
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         
         for i, adr in enumerate(adrese):
+            if i > 0:
+                log_msg("⏳ Pauza 5 sekundi izmedju adresa...", log_ph)
+                await asyncio.sleep(5)
+                
             log_msg(f"\n[SISTEM] Pokrecem skeniranje za: {adr}", log_ph)
             r = await asyncio.gather(
-                scrape_wolt(context, adr, log_ph), 
-                scrape_glovo(context, adr, log_ph)
+                scrape_wolt(context_wolt, adr, log_ph), 
+                scrape_glovo(context_glovo, adr, log_ph)
             )
             sve.extend(r[0] + r[1])
-            
-            # Kratka pauza između tabova
-            if i < len(adrese) - 1:
-                await asyncio.sleep(3)
                 
-        await context.close()
+        await context_wolt.close()
+        await context_glovo.close()
         await browser.close()
             
     if sve:
@@ -654,13 +654,11 @@ if st.session_state.pokrenuto:
 
     df = st.session_state.df_sve
     if not df.empty:
-        # OSIGURAČ
         for col in ["Vreme_Broj", "Vreme dostave", "Ocena", "Is_New"]:
             if col not in df.columns: df[col] = False if col == "Is_New" else (np.nan if "Broj" in col else "-")
 
         st.success(f"✅ Osveženo u: {datetime.datetime.fromtimestamp(st.session_state.last_run).strftime('%H:%M:%S')}")
         
-        # --- 1. TABELA NA VRHU ---
         st.subheader("📊 Zbirni po Adresama")
         tc = st.columns(len(df["Adresa"].unique()))
         for i, adr in enumerate(df["Adresa"].unique()):
@@ -673,7 +671,6 @@ if st.session_state.pokrenuto:
                 if sm: st.dataframe(pd.DataFrame(sm), hide_index=True, use_container_width=True)
         st.markdown("---")
 
-        # --- 2. GRAFIKONI ---
         st.subheader("📊 Interaktivni Grafikoni i Istorijat")
         adrese_un = list(df["Adresa"].unique())
         graf_adr = st.selectbox("📍 Filtriraj Grafikone:", ["Sve adrese"] + adrese_un, index=1 if len(adrese_un) == 1 else 0)
@@ -689,24 +686,45 @@ if st.session_state.pokrenuto:
             st.image(kreiraj_timeline_grafikon(c_h, None, "Istorijat aktivnosti"), use_container_width=True)
         st.markdown("---")
 
-        # --- 3. DETALJNA LISTA SA NOVO FILTEROM ---
-        st.subheader("🔍 Detaljna Lista Restorana")
-        f_col1, f_col2, f_col3 = st.columns(3)
-        with f_col1: fa = st.multiselect("📍 Adresa", df["Adresa"].unique(), df["Adresa"].unique())
-        with f_col2: fp = st.multiselect("📱 Platforma", df["Platforma"].unique(), df["Platforma"].unique())
-        with f_col3: fs = st.multiselect("🚦 Status", ["Otvoreno", "Zatvoreno"], ["Otvoreno", "Zatvoreno"])
-        
-        filt_new = st.checkbox("✨ Prikazi samo NOVE restorane")
+        st.subheader("⚖️ Uporedni Prikaz (Restorani na obe platforme)")
+        df['Naziv_Norm'] = df['Naziv'].apply(normalizuj_ime)
+        uporedni_podaci = []
+        for adr in df['Adresa'].unique():
+            df_adr = df[df['Adresa'] == adr]
+            wolt_df = df_adr[df_adr['Platforma'] == 'Wolt']
+            glovo_df = df_adr[df_adr['Platforma'] == 'Glovo']
+            zajednicki = set(wolt_df['Naziv_Norm']).intersection(set(glovo_df['Naziv_Norm']))
+            for norm_ime in zajednicki:
+                w_row = wolt_df[wolt_df['Naziv_Norm'] == norm_ime].iloc[0]
+                g_row = glovo_df[glovo_df['Naziv_Norm'] == norm_ime].iloc[0]
+                uporedni_podaci.append({
+                    "Adresa": adr, "Naziv (Wolt)": w_row['Naziv'], "Status Wolt": w_row['Status'], "Vreme Wolt": w_row['Vreme dostave'], "Ocena Wolt": w_row['Ocena'], "Link Wolt": w_row['Link'],
+                    "Naziv (Glovo)": g_row['Naziv'], "Status Glovo": g_row['Status'], "Vreme Glovo": g_row['Vreme dostave'], "Ocena Glovo": g_row['Ocena'], "Link Glovo": g_row['Link']
+                })
+        if uporedni_podaci:
+            df_uporedni = pd.DataFrame(uporedni_podaci)
+            st.dataframe(df_uporedni.style.map(lambda val: f'color: {"#27ae60" if val=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status Wolt', 'Status Glovo']), use_container_width=True, hide_index=True, column_config={"Link Wolt": st.column_config.LinkColumn("Link Wolt", display_text="Otvori Wolt"), "Link Glovo": st.column_config.LinkColumn("Link Glovo", display_text="Otvori Glovo")})
+        else:
+            st.info("Nema restorana koji se nalaze na obe platforme za odabrane adrese.")
+        st.markdown("---")
 
+        st.subheader("🔍 Detaljna Lista Restorana")
+        f1, f2, f3 = st.columns(3)
+        with f1: fa = st.multiselect("📍 Adresa", df["Adresa"].unique(), df["Adresa"].unique())
+        with f2: fp = st.multiselect("📱 Platforma", df["Platforma"].unique(), df["Platforma"].unique())
+        with f3: fs = st.multiselect("🚦 Status", ["Otvoreno", "Zatvoreno"], ["Otvoreno", "Zatvoreno"])
+        filt_new = st.checkbox("✨ Prikazi samo NOVE restorane")
         f_df = df[(df["Adresa"].isin(fa)) & (df["Platforma"].isin(fp)) & (df["Status"].isin(fs))]
         if filt_new: f_df = f_df[f_df["Is_New"] == True]
 
-        # Vizuelno označavanje u tabeli
-        f_df_copy = f_df.copy()
-        f_df_copy["Oznaka"] = f_df_copy["Is_New"].apply(lambda x: "✨ NOVO" if x else "")
+        disp_df = f_df.copy()
+        disp_df["Oznaka"] = disp_df["Is_New"].apply(lambda x: "✨ NOVO" if x else "")
+        disp_df = disp_df.drop(columns=['Naziv_Norm', 'Vreme_Broj', 'Is_New'], errors='ignore')
+        cols = ["Adresa", "Platforma", "Naziv", "Status", "Ocena", "Vreme dostave", "Oznaka", "Link"]
+        disp_df = disp_df[cols]
 
         st.dataframe(
-            f_df_copy[["Adresa", "Platforma", "Naziv", "Status", "Ocena", "Vreme dostave", "Oznaka", "Link"]].style.map(lambda v: f'color: {"#27ae60" if v=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status']), 
+            disp_df.style.map(lambda v: f'color: {"#27ae60" if v=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status']), 
             use_container_width=True, hide_index=True,
             column_config={"Link": st.column_config.LinkColumn("Link", display_text="Otvori na sajtu")}
         )
@@ -716,10 +734,8 @@ if st.session_state.pokrenuto:
             pc = st.columns(4)
             for i, p in enumerate(st.session_state.pdf_fajlovi):
                 with pc[i % 4]:
-                    with open(p, "rb") as f: 
-                        st.download_button(f"Preuzmi {os.path.basename(p)}", f.read(), os.path.basename(p), "application/pdf", key=f"p_{i}")
+                    with open(p, "rb") as f: st.download_button(f"Preuzmi {os.path.basename(p)}", f.read(), os.path.basename(p), "application/pdf", key=f"p_{i}")
 
-    # TAJMER BEZ BLINKANJA
     rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
     while rem > 0:
         mins, secs = divmod(rem, 60)
