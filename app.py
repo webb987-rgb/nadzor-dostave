@@ -137,6 +137,7 @@ def sacuvaj_u_istoriju(df):
 
 def kreiraj_timeline_grafikon(df_hist, adresa=None, custom_naslov=None, is_pdf=False):
     df_sub = df_hist.copy()
+    
     if adresa:
         df_sub = df_sub[df_sub["Adresa"] == adresa]
         naslov = f'Istorijat aktivnosti - {adresa.upper()}'
@@ -163,6 +164,7 @@ def kreiraj_timeline_grafikon(df_hist, adresa=None, custom_naslov=None, is_pdf=F
 
         prikazi_wolt = "Wolt" in df_sub["Platforma"].values
         prikazi_glovo = "Glovo" in df_sub["Platforma"].values
+        
         wolt_data = df_sub[df_sub["Platforma"] == "Wolt"]
         glovo_data = df_sub[df_sub["Platforma"] == "Glovo"]
 
@@ -182,9 +184,11 @@ def kreiraj_timeline_grafikon(df_hist, adresa=None, custom_naslov=None, is_pdf=F
         
         n_ticks = len(wolt_data) if prikazi_wolt else (len(glovo_data) if prikazi_glovo else 0)
         step = max(1, n_ticks // 15) 
+        
         for index, label in enumerate(ax.xaxis.get_ticklabels()):
             if index % step != 0: 
                 label.set_visible(False)
+                
         plt.xticks(rotation=45 if not jedan_dan else 0, fontsize=9)
         plt.yticks(fontsize=10)
         
@@ -200,6 +204,7 @@ def kreiraj_grafikon_status(df_sub, naslov):
     wolt_z = len(df_sub[(df_sub["Platforma"] == "Wolt") & (df_sub["Status"] == "Zatvoreno")])
     glovo_o = len(df_sub[(df_sub["Platforma"] == "Glovo") & (df_sub["Status"] == "Otvoreno")])
     glovo_z = len(df_sub[(df_sub["Platforma"] == "Glovo") & (df_sub["Status"] == "Zatvoreno")])
+    
     wolt_u = wolt_o + wolt_z
     glovo_u = glovo_o + glovo_z
     
@@ -329,8 +334,7 @@ def izvuci_ocenu(tekst, plat):
                 ocena = match.group(1).replace(',', '.')
                 
         if ocena: return ocena
-        
-        # Uklonjena 'divlja' provera za 'novo' iz ove funkcije koja je pravila false positives
+        if re.search(r'\b(novo|new)\b', cist_tekst): return "Novo"
         return "-"
     except: return "-"
 
@@ -391,11 +395,14 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
             ocena = izvuci_ocenu(sve_z, plat)
             vreme_str, vreme_num = izvuci_vreme_dostave(sve_z)
             
-            # Hirurški precizan filter za NEW/NOVO
-            # Gleda samo u sirov HTML tražeći stringove oblika >Novo< ili >NEW< (gde su strelice ivice HTML taga)
-            t_html_low = item['html'].lower()
-            is_new = bool(re.search(r'>\s*(novo|new)\s*<', t_html_low))
-            
+            # BEZBEDNA I PRECIZNA LOGIKA ZA "NOVO" BEZ DIRANJA OSTATKA
+            is_new = False
+            t_low = text.strip().lower()
+            if plat == "Wolt":
+                is_new = bool(re.search(r'>\s*(novo|new)\s*<', item['html'].lower())) or (ocena == "Novo")
+            else:
+                is_new = t_low.endswith('new') or t_low.endswith('novo') or bool(re.search(r'•.*?new\b', t_low)) or (ocena == "Novo")
+
             results_dict[link] = {
                 "Adresa": address, 
                 "Platforma": plat, 
@@ -403,7 +410,7 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
                 "Ocena": ocena,
                 "Vreme dostave": vreme_str,
                 "Status": analiziraj_status(sve_z),
-                "Vreme_Broj": vreme_num, 
+                "Vreme_Broj": vreme_num,
                 "Is_New": is_new,
                 "Link": link
             }
