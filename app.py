@@ -388,22 +388,15 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
         else: pokusaji = 0
     return list(results_dict.values())
 
-# ---------------- SCRAPERS (STEALTH + FAST FAIL) ----------------
+# ---------------- SCRAPERS (STEALTH + HUMAN NAVIGATION) ----------------
 async def scrape_wolt(context_wolt, address, log_ph=None, error_screenshots=None):
     page = None
     try:
         page = await context_wolt.new_page()
-        
-        # STEALTH: Brišemo WebDriver trag pre nego što se išta učita
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page.set_default_timeout(10000)
         
         await page.goto("https://wolt.com/sr/srb")
-        try:
-            await page.evaluate("window.localStorage.clear(); window.sessionStorage.clear();")
-            await page.goto("https://wolt.com/sr/srb")
-        except: pass
-        
         try: await page.locator("[data-test-id='allow-button']").click(timeout=3000)
         except: pass
         
@@ -424,21 +417,9 @@ async def scrape_wolt(context_wolt, address, log_ph=None, error_screenshots=None
             return rez
         except PlaywrightTimeoutError:
             log_msg(f"[WOLT TIMEOUT] Odustajem od adrese {address} zbog sporog učitavanja.", log_ph)
-            if page and error_screenshots is not None:
-                try:
-                    err_path = str(ERRORS_DIR / f"Wolt_Timeout_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
-                    await page.screenshot(path=err_path)
-                    error_screenshots.append(err_path)
-                except: pass
             return []
     except Exception as e: 
         log_msg(f"[WOLT GREŠKA] {e}", log_ph)
-        if page and error_screenshots is not None:
-            try:
-                err_path = str(ERRORS_DIR / f"Wolt_Error_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
-                await page.screenshot(path=err_path)
-                error_screenshots.append(err_path)
-            except: pass
         return []
     finally:
         if page: await page.close()
@@ -446,7 +427,7 @@ async def scrape_wolt(context_wolt, address, log_ph=None, error_screenshots=None
 async def scrape_glovo(context_glovo, address, log_ph=None, error_screenshots=None):
     page = None
     try:
-        await context_glovo.clear_cookies()
+        # NE BRIŠEMO KOLAČIĆE! Čuvamo propusnicu od Cloudflare-a!
         page = await context_glovo.new_page()
         
         # STEALTH: Skrivamo da smo robot od Cloudflare-a i Glova
@@ -455,67 +436,64 @@ async def scrape_glovo(context_glovo, address, log_ph=None, error_screenshots=No
         
         await page.goto("https://glovoapp.com/sr/rs", wait_until="domcontentloaded")
         
-        # DETEKCIJA SOFT BANA ("Oh, no!" Ekran)
+        # FAST-FAIL: Detekcija "Oh, no!" ekrana
         stranica_tekst = await page.content()
         if "Oh, no!" in stranica_tekst or "It looks like there's a problem" in stranica_tekst:
-            log_msg(f"[GLOVO BLOKADA] Glovo je detektovao bota i bacio 'Oh, no!' ekran za {address}.", log_ph)
+            log_msg(f"[GLOVO BLOKADA] Glovo je detektovao bota na {address}. Slikam i odustajem.", log_ph)
             if error_screenshots is not None:
                 try:
                     err_path = str(ERRORS_DIR / f"Glovo_SoftBan_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
                     await page.screenshot(path=err_path)
                     error_screenshots.append(err_path)
                 except: pass
-            return [] # Odustajemo odmah, ne gubimo 10 sekundi na cekanje
-            
-        try:
-            await page.evaluate("""
-                window.localStorage.clear();
-                window.sessionStorage.clear();
-                indexedDB.databases().then(dbs => {
-                    dbs.forEach(db => indexedDB.deleteDatabase(db.name));
-                });
-            """)
-            await asyncio.sleep(1)
-            await page.goto("https://glovoapp.com/sr/rs", wait_until="domcontentloaded")
-        except: pass
+            return []
         
         try: await page.get_by_role("button", name=re.compile("Accept|Prihvati", re.I)).click(timeout=3000)
         except: pass
         
+        # LOGIKA PRAVOG ČOVEKA: Da li vidimo glavno polje (prva adresa) ili zaglavlje (druga adresa)?
         try:
+            # Pokušaj 1: Potpuno nova, čista sesija (vidimo veliko polje na sredini)
             hero_input = page.locator("#hero-container-input")
-            await hero_input.wait_for(state="visible", timeout=6000)
+            await hero_input.wait_for(state="visible", timeout=4000)
             await hero_input.click()
             search = page.get_by_role("searchbox")
             await search.fill(address)
+            
+            dropdown_item = page.locator("div[data-actionable='true'][role='button']").first
+            await dropdown_item.wait_for(state="visible", timeout=8000)
+            await dropdown_item.click()
+            
         except PlaywrightTimeoutError:
-            log_msg(f"[GLOVO TIMEOUT] Prvo polje nije nađeno, prelazim na Fallback za {address}", log_ph)
+            # Pokušaj 2: Glovo nas se seća! Klikćemo na trenutnu adresu u zaglavlju kao pravi čovek.
+            log_msg(f"[GLOVO] Menjam adresu kao pravi korisnik za: {address}", log_ph)
             try:
+                # Nalazimo dugme u headeru gde piše trenutna adresa
                 header_btn = page.locator('header div[role="button"]').first
                 await header_btn.wait_for(state="visible", timeout=5000)
                 await header_btn.click()
-                await asyncio.sleep(2)
+                
+                await asyncio.sleep(1)
                 search_modal = page.get_by_role("searchbox").last
                 await search_modal.wait_for(state="visible", timeout=5000)
                 await search_modal.click()
                 await search_modal.fill(address)
+                
+                await asyncio.sleep(2)
+                # Klik na prvi predlog u padajućem meniju novog prozora
+                dropdown_item = page.locator("div[data-actionable='true'][role='button']").first
+                await dropdown_item.wait_for(state="visible", timeout=8000)
+                await dropdown_item.click()
             except PlaywrightTimeoutError:
-                log_msg(f"[GLOVO ODUSTAJEM] Adresa {address} je zablokirana (Anti-bot štit). Slikam ekran...", log_ph)
-                if page and error_screenshots is not None:
+                log_msg(f"[GLOVO ODUSTAJEM] Ne mogu da promenim adresu za {address}. Slikam...", log_ph)
+                if error_screenshots is not None:
                     try:
-                        err_path = str(ERRORS_DIR / f"Glovo_Blokada_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
+                        err_path = str(ERRORS_DIR / f"Glovo_Nav_Error_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
                         await page.screenshot(path=err_path)
                         error_screenshots.append(err_path)
                     except: pass
                 return []
 
-        try:
-            dropdown_item = page.locator("div[data-actionable='true'][role='button']").first
-            await dropdown_item.wait_for(state="visible", timeout=8000)
-            await dropdown_item.click()
-        except PlaywrightTimeoutError: 
-            await page.keyboard.press("Enter")
-        
         try:
             btn_drugo = page.locator("button:has-text('Drugo')")
             await btn_drugo.wait_for(state="visible", timeout=3000)
@@ -548,12 +526,6 @@ async def scrape_glovo(context_glovo, address, log_ph=None, error_screenshots=No
         return rez
     except Exception as e: 
         log_msg(f"[GLOVO GREŠKA] {e}", log_ph)
-        if page and error_screenshots is not None:
-            try:
-                err_path = str(ERRORS_DIR / f"Glovo_Error_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
-                await page.screenshot(path=err_path)
-                error_screenshots.append(err_path)
-            except: pass
         return []
     finally:
         if page: await page.close()
@@ -661,7 +633,6 @@ async def proces_skeniranja(adrese, log_ph):
             permissions=['geolocation'],
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
-        # Dodajemo Accept-Language za dodatnu realističnost Glovu
         context_glovo = await browser.new_context(
             permissions=['geolocation'],
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -825,7 +796,6 @@ if st.session_state.pokrenuto:
                 with pc[i % 4]:
                     with open(p, "rb") as f: st.download_button(f"Preuzmi {os.path.basename(p)}", f.read(), os.path.basename(p), "application/pdf", key=f"p_{i}")
                     
-        # PRIKAZ SLIKA SA GREŠKAMA AKO IH IMA
         if st.session_state.error_screenshots:
             st.markdown("---")
             st.subheader("📸 Zabeležene greške (Screenshots)")
