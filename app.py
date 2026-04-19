@@ -200,37 +200,36 @@ def kreiraj_timeline_grafikon(df_hist, adresa=None, custom_naslov=None, is_pdf=F
     return imgdata
 
 def kreiraj_grafikon_status(df_sub, naslov):
+    # Racunanje brojeva
     wolt_o = len(df_sub[(df_sub["Platforma"] == "Wolt") & (df_sub["Status"] == "Otvoreno")])
     wolt_z = len(df_sub[(df_sub["Platforma"] == "Wolt") & (df_sub["Status"] == "Zatvoreno")])
     glovo_o = len(df_sub[(df_sub["Platforma"] == "Glovo") & (df_sub["Status"] == "Otvoreno")])
     glovo_z = len(df_sub[(df_sub["Platforma"] == "Glovo") & (df_sub["Status"] == "Zatvoreno")])
     
-    fig, ax = plt.subplots(figsize=(5, 4), facecolor='#ffffff')
-    prikazi_wolt = "Wolt" in df_sub["Platforma"].values or df_sub.empty
-    prikazi_glovo = "Glovo" in df_sub["Platforma"].values or df_sub.empty
+    wolt_u = wolt_o + wolt_z
+    glovo_u = glovo_o + glovo_z
     
-    # Fiksirane dimenzije i širina kolona da grafik uvek bude isti
-    if prikazi_wolt and prikazi_glovo:
-        ax.bar([0.2, 0.8], [wolt_o, wolt_z], width=0.35, label='Wolt', color='#00c2e8')
-        ax.bar([1.2, 1.8], [glovo_o, glovo_z], width=0.35, label='Glovo', color='#ffc244')
-        ax.set_xticks([0.5, 1.5])
-        ax.set_xlim(-0.2, 2.2)
-    elif prikazi_wolt:
-        ax.bar([0.2, 0.8], [wolt_o, wolt_z], width=0.35, label='Wolt', color='#00c2e8')
-        ax.set_xticks([0.5])
-        ax.set_xlim(-0.2, 1.2)
-    elif prikazi_glovo:
-        ax.bar([0.2, 0.8], [glovo_o, glovo_z], width=0.35, label='Glovo', color='#ffc244')
-        ax.set_xticks([0.5])
-        ax.set_xlim(-0.2, 1.2)
-        
-    ax.set_xticklabels(['Otvoreno/Zatvoreno'] if not (prikazi_wolt and prikazi_glovo) else ['Wolt\n(Otv/Zat)', 'Glovo\n(Otv/Zat)'])
+    fig, ax = plt.subplots(figsize=(6, 4), facecolor='#ffffff')
+    labels = ['Ukupno', 'Otvoreno', 'Zatvoreno']
+    x = np.arange(len(labels))
+    width = 0.35
     
-    max_val = max([wolt_o, wolt_z, glovo_o, glovo_z]) if max([wolt_o, wolt_z, glovo_o, glovo_z]) > 0 else 10
-    ax.set_ylim(0, max_val * 1.2)
+    ax.bar(x - width/2, [wolt_u, wolt_o, wolt_z], width, color='#00c2e8', label='Wolt')
+    ax.bar(x + width/2, [glovo_u, glovo_o, glovo_z], width, color='#ffc244', label='Glovo')
     
-    ax.legend(frameon=False)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontweight='bold', fontsize=10)
     ax.set_title(naslov, fontsize=12, fontweight='bold', color='#2c3e50')
+    ax.legend(frameon=False)
+    
+    # Dodavanje brojki na vrh kolona
+    for i, v in enumerate([wolt_u, wolt_o, wolt_z]):
+        if v > 0: ax.text(i - width/2, v + 0.5, str(v), ha='center', va='bottom', fontweight='bold', color='#2c3e50', fontsize=9)
+    for i, v in enumerate([glovo_u, glovo_o, glovo_z]):
+        if v > 0: ax.text(i + width/2, v + 0.5, str(v), ha='center', va='bottom', fontweight='bold', color='#2c3e50', fontsize=9)
+        
+    max_v = max([wolt_u, glovo_u]) if max([wolt_u, glovo_u]) > 0 else 10
+    ax.set_ylim(0, max_v * 1.2)
     
     plt.tight_layout()
     imgdata = BytesIO()
@@ -240,7 +239,6 @@ def kreiraj_grafikon_status(df_sub, naslov):
     return imgdata
 
 def kreiraj_grafikon_vreme_dostave(df_sub, naslov):
-    """Kreira popravljen Bar Chart sa prosečnim vremenom dostave"""
     wolt_df = df_sub[(df_sub["Platforma"] == "Wolt") & (df_sub["Vreme_Broj"].notna())]
     glovo_df = df_sub[(df_sub["Platforma"] == "Glovo") & (df_sub["Vreme_Broj"].notna())]
     
@@ -251,7 +249,6 @@ def kreiraj_grafikon_vreme_dostave(df_sub, naslov):
     prikazi_wolt = "Wolt" in df_sub["Platforma"].values or df_sub.empty
     prikazi_glovo = "Glovo" in df_sub["Platforma"].values or df_sub.empty
     
-    # Fiksne koordinate X ose da bi proporcije bile identične grafikonu levo
     if prikazi_wolt and prikazi_glovo:
         bars = ax.bar([0.2, 0.8], [w_avg, g_avg], color=['#00c2e8', '#ffc244'], width=0.35)
         ax.set_xticks([0.2, 0.8])
@@ -313,7 +310,11 @@ def izvuci_ime(tekst):
 
 def analiziraj_status(text):
     t = text.lower()
-    ind = ["zatvoreno", "zakažite", "zakaži", "zakazi", "otvara se", "otvara", "closed", "schedule", "nedostupno"]
+    ind = [
+        "samo preuzimanje", "samo za preuzimanje", "pickup only", 
+        "dostava nije dostupna", "dostava trenutno nije", "samo licno preuzimanje",
+        "zatvoreno", "zakažite", "zakaži", "zakazi", "nedostupno", "otvara se", "otvara", "closed", "schedule"
+    ]
     if any(k in t for k in ind): return "Zatvoreno"
     return "Otvoreno"
 
@@ -340,7 +341,6 @@ def izvuci_ocenu(tekst, plat):
     except: return "-"
 
 def izvuci_vreme_dostave(tekst):
-    """Izvlači vreme tako što prvo obriše sve HTML tagove da se brojevi normalno spoje"""
     try:
         if not tekst: return "-", np.nan
         cist_tekst = re.sub(r'<[^>]+>', ' ', tekst).lower()
@@ -681,6 +681,20 @@ if st.session_state.pokrenuto:
 
         st.success(f"✅ Osveženo u: {datetime.datetime.fromtimestamp(st.session_state.last_run).strftime('%H:%M:%S')}")
         
+        # --- TABELA NA VRHU ---
+        st.subheader("📊 Zbirni po Adresama")
+        tc = st.columns(len(df["Adresa"].unique()))
+        for i, adr in enumerate(df["Adresa"].unique()):
+            with tc[i % len(tc)]:
+                st.markdown(f"**📍 {adr.upper()}**")
+                sd = df[df["Adresa"] == adr]
+                sm = []
+                for p in ["Wolt", "Glovo"]:
+                    pd_f = sd[sd["Platforma"] == p]
+                    if not pd_f.empty: sm.append({"Platforma": p, "Ukupno": len(pd_f), "Otvoreno": len(pd_f[pd_f["Status"]=="Otvoreno"]), "Zatvoreno": len(pd_f[pd_f["Status"]=="Zatvoreno"])})
+                if sm: st.dataframe(pd.DataFrame(sm), hide_index=True, use_container_width=True)
+        st.markdown("---")
+
         st.subheader("📊 Interaktivni Grafikoni i Istorijat")
         
         g1, g2 = st.columns(2)
@@ -715,7 +729,7 @@ if st.session_state.pokrenuto:
         else:
             chart_hist = hist_df
 
-        c_df, n1, n2 = df.copy(), "Ukupni Status", "Istorijat"
+        c_df, n1, n2 = df.copy(), "Uporedni Status", "Istorijat"
         
         if graf_adr != "Sve adrese": 
             c_df = c_df[c_df["Adresa"] == graf_adr]
@@ -731,19 +745,6 @@ if st.session_state.pokrenuto:
         with ca: st.image(kreiraj_grafikon_status(c_df, n1), use_container_width=True)
         with cb: st.image(kreiraj_grafikon_vreme_dostave(c_df, "Prosečno vreme dostave"), use_container_width=True)
         st.image(kreiraj_timeline_grafikon(chart_hist, None, n2, is_pdf=False), use_container_width=True)
-        st.markdown("---")
-
-        st.subheader("📊 Zbirni po Adresama")
-        tc = st.columns(len(df["Adresa"].unique()))
-        for i, adr in enumerate(df["Adresa"].unique()):
-            with tc[i % len(tc)]:
-                st.markdown(f"**📍 {adr.upper()}**")
-                sd = df[df["Adresa"] == adr]
-                sm = []
-                for p in ["Wolt", "Glovo"]:
-                    pd_f = sd[sd["Platforma"] == p]
-                    if not pd_f.empty: sm.append({"Platforma": p, "Nadjeno": len(pd_f), "Otvoreno": len(pd_f[pd_f["Status"]=="Otvoreno"]), "Zatvoreno": len(pd_f[pd_f["Status"]=="Zatvoreno"])})
-                if sm: st.dataframe(pd.DataFrame(sm), hide_index=True, use_container_width=True)
         st.markdown("---")
 
         st.subheader("⚖️ Uporedni Prikaz (Restorani na obe platforme)")
@@ -822,14 +823,15 @@ if st.session_state.pokrenuto:
                     with open(p, "rb") as f: 
                         st.download_button(f"Preuzmi {os.path.basename(p)}", f.read(), os.path.basename(p), "application/pdf", key=f"p_{i}")
 
-    # LOGIKA ZA AUTOMATSKO POKRETANJE
+    # LOGIKA ZA TAJMER I AUTOMATSKO POKRETANJE (BEZ TREPTANJA EKRANA)
     rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
-    if rem > 0:
-        timer_ph.info(f"⏳ Sledeće skeniranje za: **{rem}** s")
+    while rem > 0:
+        mins, secs = divmod(rem, 60)
+        timer_ph.info(f"⏳ Sledeće skeniranje za: **{mins:02d}:{secs:02d}**")
         time.sleep(1)
-        st.rerun()
-    else:
-        # Automatski obara rerun kada istekne tajmer (okida novo skeniranje)
-        st.rerun()
+        rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
+    
+    # Kada petlja zavrsi (rem <= 0), osvezi skriptu da bi pokrenuo novo skeniranje
+    st.rerun()
 else: 
     st.info("Sistem zaustavljen. Unesite parametre u meniju sa leve strane i kliknite 'Pokreni'.")
