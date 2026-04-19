@@ -369,34 +369,81 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
         else: pokusaji = 0
     return list(results_dict.values())
 
-# ---------------- SCRAPERS ----------------
+# ---------------- SCRAPERS (NOVA, BEZBEDNIJA VERZIJA) ----------------
 async def scrape_wolt(browser, address, log_ph=None):
     try:
-        context = await browser.new_context(permissions=['geolocation']); page = await context.new_page(); await page.goto("https://wolt.com/sr/srb")
+        # User Agent maska
+        context = await browser.new_context(
+            permissions=['geolocation'],
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        page = await context.new_page()
+        await page.goto("https://wolt.com/sr/srb")
         try: await page.locator("[data-test-id='allow-button']").click(timeout=3000)
         except: pass
-        input_f = page.get_by_role("combobox"); await input_f.click(); await input_f.fill(address); await asyncio.sleep(2); await page.keyboard.press("ArrowDown"); await page.keyboard.press("Enter")
-        await asyncio.sleep(5); await page.goto("https://wolt.com/sr/discovery/restaurants")
+        
+        input_f = page.get_by_role("combobox")
+        await input_f.click(timeout=10000)
+        await input_f.fill(address)
+        await asyncio.sleep(2)
+        await page.keyboard.press("ArrowDown")
+        await page.keyboard.press("Enter")
+        await asyncio.sleep(5)
+        await page.goto("https://wolt.com/sr/discovery/restaurants")
         try: await page.wait_for_selector("a[data-test-id^='venueCard.']", timeout=10000)
-        except: return []
-        rez = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", address, log_ph); await context.close(); return rez
-    except Exception as e: log_msg(f"[WOLT GREŠKA] {e}", log_ph); return []
+        except: pass
+        
+        rez = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", address, log_ph)
+        await context.close()
+        return rez
+    except Exception as e: 
+        log_msg(f"[WOLT GREŠKA] {e}", log_ph)
+        return []
 
 async def scrape_glovo(browser, address, log_ph=None):
     try:
-        context = await browser.new_context(permissions=['geolocation']); page = await context.new_page(); await page.goto("https://glovoapp.com/sr/rs")
-        try: await page.get_by_role("button", name=re.compile("Accept|Prihvati", re.I)).click(timeout=3000)
+        # User Agent maska smanjuje sansu za Cloudflare blokadu
+        context = await browser.new_context(
+            permissions=['geolocation'],
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        page = await context.new_page()
+        await page.goto("https://glovoapp.com/sr/rs", wait_until="domcontentloaded")
+        
+        try: await page.get_by_role("button", name=re.compile("Accept|Prihvati", re.I)).click(timeout=4000)
         except: pass
-        await page.locator("#hero-container-input").click(); search = page.get_by_role("searchbox"); await search.fill(address)
+        
+        # UGRADJEN FALLBACK ZA UNOS UMESTO DA PUKNE AKO NEMA POLJA
         try:
-            dropdown_item = page.locator("div[data-actionable='true'][role='button']").first; await dropdown_item.wait_for(state="visible", timeout=8000); await dropdown_item.click()
+            await page.locator("#hero-container-input").click(timeout=10000)
+            search = page.get_by_role("searchbox")
+            await search.fill(address)
+        except:
+            log_msg(f"[GLOVO] Alternativni unos za {address}", log_ph)
+            try:
+                search_alt = page.locator("input").first
+                await search_alt.click(timeout=5000)
+                await search_alt.fill(address)
+            except: pass
+
+        try:
+            dropdown_item = page.locator("div[data-actionable='true'][role='button']").first
+            await dropdown_item.wait_for(state="visible", timeout=8000)
+            await dropdown_item.click()
         except: await page.keyboard.press("Enter")
+        
         try:
-            btn_drugo = page.locator("button:has-text('Drugo')"); await btn_drugo.wait_for(state="visible", timeout=4000); await btn_drugo.click()
+            btn_drugo = page.locator("button:has-text('Drugo')")
+            await btn_drugo.wait_for(state="visible", timeout=4000)
+            await btn_drugo.click()
         except: pass
+        
         try:
-            btn_potvrdi = page.locator("button:has-text('Potvrdi adresu')"); await btn_potvrdi.wait_for(state="visible", timeout=4000); await btn_potvrdi.click()
+            btn_potvrdi = page.locator("button:has-text('Potvrdi adresu')")
+            await btn_potvrdi.wait_for(state="visible", timeout=4000)
+            await btn_potvrdi.click()
         except: pass
+        
         await asyncio.sleep(5)
         try:
             btn_pocetna = page.locator("text='Idi na početnu stranicu'")
@@ -404,13 +451,22 @@ async def scrape_glovo(browser, address, log_ph=None):
                 await btn_pocetna.first.click()
                 await asyncio.sleep(5)
         except: pass
+        
         try:
-            kat_link = page.get_by_role("link", name=re.compile(r"Restorani|Hrana", re.I)).first; await kat_link.wait_for(state="visible", timeout=7000); await kat_link.click()
+            kat_link = page.get_by_role("link", name=re.compile(r"Restorani|Hrana", re.I)).first
+            await kat_link.wait_for(state="visible", timeout=7000)
+            await kat_link.click()
         except: pass
-        await asyncio.sleep(5); rez = await pametno_skrolovanje_i_ekstrakcija(page, "Glovo", address, log_ph); await context.close(); return rez
-    except Exception as e: log_msg(f"[GLOVO GREŠKA] {e}", log_ph); return []
+        
+        await asyncio.sleep(5)
+        rez = await pametno_skrolovanje_i_ekstrakcija(page, "Glovo", address, log_ph)
+        await context.close()
+        return rez
+    except Exception as e: 
+        log_msg(f"[GLOVO GREŠKA] {e}", log_ph)
+        return []
 
-# ---------------- PDF LOGIC (BEZBEDNE PETLJE BEZ LIST COMPREHENSION BAGOVA) ----------------
+# ---------------- PDF LOGIC ----------------
 def format_pdf_stavka(tekst, status, stil):
     boja = "#27ae60" if status == "Otvoreno" else "#e74c3c"
     return Paragraph(f"<font color='{boja}' size=16>&bull;</font> {tekst}", stil)
@@ -499,31 +555,32 @@ def napravi_zbirni_pdf(df, df_hist):
     doc.build(elements); return p_path
 
 # ---------------- PROCES SKENIRANJA ----------------
-async def run_platform_scraper(p_name, p, adr, log_ph):
-    browser = await p.chromium.launch(headless=True) 
-    try:
-        if p_name == "Wolt": return await scrape_wolt(browser, adr, log_ph)
-        return await scrape_glovo(browser, adr, log_ph)
-    finally: await browser.close()
-
 async def proces_skeniranja(adrese, log_ph):
     sve = []
     async with async_playwright() as p:
+        # PODIŽEMO PRETRAŽIVAČ SAMO JEDNOM NA POČETKU
+        browser = await p.chromium.launch(headless=True) 
+        
         for i, adr in enumerate(adrese):
             if i > 0:
                 log_msg("⏳ Kratka pauza (12s) zbog Glovo anti-bot zaštite...", log_ph)
                 await asyncio.sleep(12)
                 
             log_msg(f"\n[SISTEM] Pokrecem skeniranje za: {adr}", log_ph)
-            r = await asyncio.gather(run_platform_scraper("Wolt", p, adr, log_ph), run_platform_scraper("Glovo", p, adr, log_ph))
+            r = await asyncio.gather(
+                scrape_wolt(browser, adr, log_ph), 
+                scrape_glovo(browser, adr, log_ph)
+            )
             sve.extend(r[0] + r[1])
+            
+        # GASIMO GA TEK KAD ZAVRŠI SVE ADRESE
+        await browser.close()
             
     if sve:
         df_s = pd.DataFrame(sve)
         df_h = sacuvaj_u_istoriju(df_s)
         log_msg("Generisem PDF izvestaje...", log_ph)
         
-        # BEZBEDNA PETLJA BEZ COMPREHENSION BAGOVA
         pdf_fajlovi = []
         zbirni = napravi_zbirni_pdf(df_s, df_h)
         if zbirni: pdf_fajlovi.append(zbirni)
