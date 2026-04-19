@@ -833,5 +833,3 @@ if st.session_state.pokrenuto:
         st.rerun()
 else: 
     st.info("Sistem zaustavljen. Unesite parametre u meniju sa leve strane i kliknite 'Pokreni'.")
-
-
