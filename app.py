@@ -409,7 +409,10 @@ async def scrape_glovo(browser, address, log_ph=None):
         except: pass
         await asyncio.sleep(5)
         try:
-            btn_pocetna = page.locator("text='Idi na početnu stranicu'"); if await btn_pocetna.count() > 0 and await btn_pocetna.first.is_visible(timeout=3000): await btn_pocetna.first.click(); await asyncio.sleep(5)
+            btn_pocetna = page.locator("text='Idi na početnu stranicu'")
+            if await btn_pocetna.count() > 0 and await btn_pocetna.first.is_visible(timeout=3000):
+                await btn_pocetna.first.click()
+                await asyncio.sleep(5)
         except: pass
         try:
             kat_link = page.get_by_role("link", name=re.compile(r"Restorani|Hrana", re.I)).first; await kat_link.wait_for(state="visible", timeout=7000); await kat_link.click()
