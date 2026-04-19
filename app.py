@@ -277,7 +277,11 @@ def izvuci_ime(tekst):
 
 def analiziraj_status(text):
     t = text.lower()
-    ind = ["samo preuzimanje", "samo za preuzimanje", "pickup only", "dostava nije dostupna", "dostava trenutno nije", "samo licno preuzimanje", "zatvoreno", "zakažite", "zakaži", "zakazi", "nedostupno", "otvara se", "otvara", "closed", "schedule"]
+    ind = [
+        "samo preuzimanje", "samo za preuzimanje", "pickup only", 
+        "dostava nije dostupna", "dostava trenutno nije", "samo licno preuzimanje",
+        "zatvoreno", "zakažite", "zakaži", "zakazi", "nedostupno", "otvara se", "otvara", "closed", "schedule"
+    ]
     if any(k in t for k in ind): return "Zatvoreno"
     return "Otvoreno"
 
@@ -289,10 +293,13 @@ def izvuci_ocenu(tekst, plat):
         if plat == "Glovo":
             procenti = re.findall(r'(\d{1,3})\s*%', cist_tekst)
             for p in procenti:
-                if int(p) >= 60: ocena = p + "%"; break
+                if int(p) >= 60:
+                    ocena = p + "%"
+                    break
         elif plat == "Wolt":
             match = re.search(r'\b([5-9][.,][0-9]|10[.,]0)\b', cist_tekst)
-            if match: ocena = match.group(1).replace(',', '.')
+            if match: 
+                ocena = match.group(1).replace(',', '.')
         if ocena: return ocena
         return "-"
     except: return "-"
@@ -304,11 +311,13 @@ def izvuci_vreme_dostave(tekst):
         match = re.search(r'(\d{1,3})\s*[-–]\s*(\d{1,3})\s*(?:min|m|\')', cist_tekst)
         if match:
             v1, v2 = int(match.group(1)), int(match.group(2))
-            if v1 < 120 and v2 < 120: return f"{v1}-{v2} min", (v1 + v2) / 2.0
+            if v1 < 120 and v2 < 120:
+                return f"{v1}-{v2} min", (v1 + v2) / 2.0
         match_single = re.search(r'\b(\d{1,3})\s*(?:min|m|\')', cist_tekst)
         if match_single:
             v = int(match_single.group(1))
-            if v < 120: return f"{v} min", float(v)
+            if v < 120:
+                return f"{v} min", float(v)
         return "-", np.nan
     except: return "-", np.nan
 
@@ -341,7 +350,8 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
         for item in podaci:
             link = item['link']
             if not link or link in results_dict: continue
-            text = item['text']; sve_z = text + " " + item['html'] if plat == "Wolt" else text
+            text = item['text']
+            sve_z = text + " " + item['html'] if plat == "Wolt" else text
             ime = ukloni_kvacice(izvuci_ime(text))
             if len(ime) < 2: continue
             
@@ -365,19 +375,27 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
         if trenutni > prethodni_broj:
             log_msg(f"[{plat.upper()} - {address}] Učitano {trenutni} restorana...", log_ph)
             prethodni_broj = trenutni; pokusaji = 0
-        await page.evaluate("window.scrollBy(0, window.innerHeight);"); await asyncio.sleep(0.8)
-        h = await page.evaluate("document.body.scrollHeight"); s = await page.evaluate("window.scrollY + window.innerHeight")
+        
+        await page.evaluate("window.scrollBy(0, window.innerHeight);")
+        await asyncio.sleep(0.8)
+        
+        h = await page.evaluate("document.body.scrollHeight")
+        s = await page.evaluate("window.scrollY + window.innerHeight")
         if s >= h - 100:
-            pokusaji += 1; await asyncio.sleep(1.5)
+            pokusaji += 1
+            await asyncio.sleep(1.5)
             if pokusaji >= 5: break
         else: pokusaji = 0
     return list(results_dict.values())
 
-# ---------------- SCRAPERS (SA SLIKANJEM GREŠAKA) ----------------
+# ---------------- SCRAPERS (STEALTH + FAST FAIL) ----------------
 async def scrape_wolt(context_wolt, address, log_ph=None, error_screenshots=None):
     page = None
     try:
         page = await context_wolt.new_page()
+        
+        # STEALTH: Brišemo WebDriver trag pre nego što se išta učita
+        await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page.set_default_timeout(10000)
         
         await page.goto("https://wolt.com/sr/srb")
@@ -430,9 +448,25 @@ async def scrape_glovo(context_glovo, address, log_ph=None, error_screenshots=No
     try:
         await context_glovo.clear_cookies()
         page = await context_glovo.new_page()
+        
+        # STEALTH: Skrivamo da smo robot od Cloudflare-a i Glova
+        await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page.set_default_timeout(10000)
         
         await page.goto("https://glovoapp.com/sr/rs", wait_until="domcontentloaded")
+        
+        # DETEKCIJA SOFT BANA ("Oh, no!" Ekran)
+        stranica_tekst = await page.content()
+        if "Oh, no!" in stranica_tekst or "It looks like there's a problem" in stranica_tekst:
+            log_msg(f"[GLOVO BLOKADA] Glovo je detektovao bota i bacio 'Oh, no!' ekran za {address}.", log_ph)
+            if error_screenshots is not None:
+                try:
+                    err_path = str(ERRORS_DIR / f"Glovo_SoftBan_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
+                    await page.screenshot(path=err_path)
+                    error_screenshots.append(err_path)
+                except: pass
+            return [] # Odustajemo odmah, ne gubimo 10 sekundi na cekanje
+            
         try:
             await page.evaluate("""
                 window.localStorage.clear();
@@ -615,7 +649,7 @@ def napravi_zbirni_pdf(df, df_hist):
 # ---------------- PROCES SKENIRANJA ----------------
 async def proces_skeniranja(adrese, log_ph):
     sve = []
-    error_screenshots = [] # Lista za cuvanje putanja slika sa greskama
+    error_screenshots = [] 
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -627,9 +661,11 @@ async def proces_skeniranja(adrese, log_ph):
             permissions=['geolocation'],
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
+        # Dodajemo Accept-Language za dodatnu realističnost Glovu
         context_glovo = await browser.new_context(
             permissions=['geolocation'],
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9,sr;q=0.8"}
         )
         
         for i, adr in enumerate(adrese):
