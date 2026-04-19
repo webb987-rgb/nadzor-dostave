@@ -369,53 +369,46 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
         else: pokusaji = 0
     return list(results_dict.values())
 
-# ---------------- SCRAPERS (MULTI-TAB VERZIJA) ----------------
-# Sada primaju "context" (Glavnu sesiju) umesto praznog browsera, i otvaraju "Tab" (page)
-async def scrape_wolt(context, address, log_ph=None):
+# ---------------- SCRAPERS (VRAĆENA CISTA SESIJA PER ADRESA) ----------------
+async def scrape_wolt(browser, address, log_ph=None):
+    context = None
     try:
-        page = await context.new_page() # Otvara novi tab u istoj sesiji
+        context = await browser.new_context(
+            permissions=['geolocation'],
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        page = await context.new_page()
         await page.goto("https://wolt.com/sr/srb")
         try: await page.locator("[data-test-id='allow-button']").click(timeout=3000)
         except: pass
-        
-        input_f = page.get_by_role("combobox")
-        await input_f.click(timeout=10000)
-        await input_f.fill(address)
-        await asyncio.sleep(2)
-        await page.keyboard.press("ArrowDown")
-        await page.keyboard.press("Enter")
-        await asyncio.sleep(5)
-        await page.goto("https://wolt.com/sr/discovery/restaurants")
+        input_f = page.get_by_role("combobox"); await input_f.click(); await input_f.fill(address); await asyncio.sleep(2); await page.keyboard.press("ArrowDown"); await page.keyboard.press("Enter")
+        await asyncio.sleep(5); await page.goto("https://wolt.com/sr/discovery/restaurants")
         try: await page.wait_for_selector("a[data-test-id^='venueCard.']", timeout=10000)
         except: pass
-        
         rez = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", address, log_ph)
-        await page.close() # Zatvara tab kada zavrsi
         return rez
     except Exception as e: 
         log_msg(f"[WOLT GREŠKA] {e}", log_ph)
         return []
+    finally:
+        if context: await context.close()
 
-async def scrape_glovo(context, address, log_ph=None):
+async def scrape_glovo(browser, address, log_ph=None):
+    context = None
     try:
-        page = await context.new_page() # Otvara novi tab u istoj sesiji
-        await page.goto("https://glovoapp.com/sr/rs", wait_until="domcontentloaded")
-        
-        try: await page.get_by_role("button", name=re.compile("Accept|Prihvati", re.I)).click(timeout=4000)
+        context = await browser.new_context(
+            permissions=['geolocation'],
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        page = await context.new_page()
+        await page.goto("https://glovoapp.com/sr/rs")
+        try: await page.get_by_role("button", name=re.compile("Accept|Prihvati", re.I)).click(timeout=3000)
         except: pass
         
-        try:
-            await page.locator("#hero-container-input").click(timeout=10000)
-            search = page.get_by_role("searchbox")
-            await search.fill(address)
-        except:
-            log_msg(f"[GLOVO] Alternativni unos za {address}", log_ph)
-            try:
-                search_alt = page.locator("input").first
-                await search_alt.click(timeout=5000)
-                await search_alt.fill(address)
-            except: pass
-
+        await page.locator("#hero-container-input").click(timeout=10000)
+        search = page.get_by_role("searchbox")
+        await search.fill(address)
+        
         try:
             dropdown_item = page.locator("div[data-actionable='true'][role='button']").first
             await dropdown_item.wait_for(state="visible", timeout=8000)
@@ -450,13 +443,14 @@ async def scrape_glovo(context, address, log_ph=None):
         
         await asyncio.sleep(5)
         rez = await pametno_skrolovanje_i_ekstrakcija(page, "Glovo", address, log_ph)
-        await page.close() # Zatvara tab kada zavrsi
         return rez
     except Exception as e: 
         log_msg(f"[GLOVO GREŠKA] {e}", log_ph)
         return []
+    finally:
+        if context: await context.close()
 
-# ---------------- PDF LOGIC ----------------
+# ---------------- PDF LOGIC (BEZBEDNE PETLJE BEZ LIST COMPREHENSION BAGOVA) ----------------
 def format_pdf_stavka(tekst, status, stil):
     boja = "#27ae60" if status == "Otvoreno" else "#e74c3c"
     return Paragraph(f"<font color='{boja}' size=16>&bull;</font> {tekst}", stil)
@@ -548,29 +542,23 @@ def napravi_zbirni_pdf(df, df_hist):
 async def proces_skeniranja(adrese, log_ph):
     sve = []
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True) 
-        
-        # KREIRAMO JEDNU GLAVNU SESIJU ZA SVE ADRESE
-        context = await browser.new_context(
-            permissions=['geolocation'],
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"]
+        ) 
         
         for i, adr in enumerate(adrese):
+            if i > 0:
+                log_msg("⏳ Čistim memoriju i čekam 15s pre sledeće adrese (Anti-Bot)...", log_ph)
+                await asyncio.sleep(15)
+                
             log_msg(f"\n[SISTEM] Pokrecem skeniranje za: {adr}", log_ph)
-            
-            # Prosledjujemo CONTEXT, scrapersi samo otvaraju Tremove
             r = await asyncio.gather(
-                scrape_wolt(context, adr, log_ph), 
-                scrape_glovo(context, adr, log_ph)
+                scrape_wolt(browser, adr, log_ph), 
+                scrape_glovo(browser, adr, log_ph)
             )
             sve.extend(r[0] + r[1])
             
-            # Kratka pauza izmedju adresa dok se menjaju tabovi
-            if i < len(adrese) - 1:
-                await asyncio.sleep(2)
-                
-        await context.close()
         await browser.close()
             
     if sve:
@@ -631,11 +619,13 @@ if st.session_state.pokrenuto:
 
     df = st.session_state.df_sve
     if not df.empty:
+        # OSIGURAČ
         for col in ["Vreme_Broj", "Vreme dostave", "Ocena", "Is_New"]:
             if col not in df.columns: df[col] = False if col == "Is_New" else (np.nan if "Broj" in col else "-")
 
         st.success(f"✅ Osveženo u: {datetime.datetime.fromtimestamp(st.session_state.last_run).strftime('%H:%M:%S')}")
         
+        # --- 1. TABELA NA VRHU ---
         st.subheader("📊 Zbirni po Adresama")
         tc = st.columns(len(df["Adresa"].unique()))
         for i, adr in enumerate(df["Adresa"].unique()):
@@ -648,6 +638,7 @@ if st.session_state.pokrenuto:
                 if sm: st.dataframe(pd.DataFrame(sm), hide_index=True, use_container_width=True)
         st.markdown("---")
 
+        # --- 2. GRAFIKONI ---
         st.subheader("📊 Interaktivni Grafikoni i Istorijat")
         adrese_un = list(df["Adresa"].unique())
         graf_adr = st.selectbox("📍 Filtriraj Grafikone:", ["Sve adrese"] + adrese_un, index=1 if len(adrese_un) == 1 else 0)
@@ -663,45 +654,24 @@ if st.session_state.pokrenuto:
             st.image(kreiraj_timeline_grafikon(c_h, None, "Istorijat aktivnosti"), use_container_width=True)
         st.markdown("---")
 
-        st.subheader("⚖️ Uporedni Prikaz (Restorani na obe platforme)")
-        df['Naziv_Norm'] = df['Naziv'].apply(normalizuj_ime)
-        uporedni_podaci = []
-        for adr in df['Adresa'].unique():
-            df_adr = df[df['Adresa'] == adr]
-            wolt_df = df_adr[df_adr['Platforma'] == 'Wolt']
-            glovo_df = df_adr[df_adr['Platforma'] == 'Glovo']
-            zajednicki = set(wolt_df['Naziv_Norm']).intersection(set(glovo_df['Naziv_Norm']))
-            for norm_ime in zajednicki:
-                w_row = wolt_df[wolt_df['Naziv_Norm'] == norm_ime].iloc[0]
-                g_row = glovo_df[glovo_df['Naziv_Norm'] == norm_ime].iloc[0]
-                uporedni_podaci.append({
-                    "Adresa": adr, "Naziv (Wolt)": w_row['Naziv'], "Status Wolt": w_row['Status'], "Vreme Wolt": w_row['Vreme dostave'], "Ocena Wolt": w_row['Ocena'], "Link Wolt": w_row['Link'],
-                    "Naziv (Glovo)": g_row['Naziv'], "Status Glovo": g_row['Status'], "Vreme Glovo": g_row['Vreme dostave'], "Ocena Glovo": g_row['Ocena'], "Link Glovo": g_row['Link']
-                })
-        if uporedni_podaci:
-            df_uporedni = pd.DataFrame(uporedni_podaci)
-            st.dataframe(df_uporedni.style.map(lambda val: f'color: {"#27ae60" if val=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status Wolt', 'Status Glovo']), use_container_width=True, hide_index=True, column_config={"Link Wolt": st.column_config.LinkColumn("Link Wolt", display_text="Otvori Wolt"), "Link Glovo": st.column_config.LinkColumn("Link Glovo", display_text="Otvori Glovo")})
-        else:
-            st.info("Nema restorana koji se nalaze na obe platforme za odabrane adrese.")
-        st.markdown("---")
-
+        # --- 3. DETALJNA LISTA SA NOVO FILTEROM ---
         st.subheader("🔍 Detaljna Lista Restorana")
-        f1, f2, f3 = st.columns(3)
-        with f1: fa = st.multiselect("📍 Adresa", df["Adresa"].unique(), df["Adresa"].unique())
-        with f2: fp = st.multiselect("📱 Platforma", df["Platforma"].unique(), df["Platforma"].unique())
-        with f3: fs = st.multiselect("🚦 Status", ["Otvoreno", "Zatvoreno"], ["Otvoreno", "Zatvoreno"])
+        f_col1, f_col2, f_col3 = st.columns(3)
+        with f_col1: fa = st.multiselect("📍 Adresa", df["Adresa"].unique(), df["Adresa"].unique())
+        with f_col2: fp = st.multiselect("📱 Platforma", df["Platforma"].unique(), df["Platforma"].unique())
+        with f_col3: fs = st.multiselect("🚦 Status", ["Otvoreno", "Zatvoreno"], ["Otvoreno", "Zatvoreno"])
+        
         filt_new = st.checkbox("✨ Prikazi samo NOVE restorane")
+
         f_df = df[(df["Adresa"].isin(fa)) & (df["Platforma"].isin(fp)) & (df["Status"].isin(fs))]
         if filt_new: f_df = f_df[f_df["Is_New"] == True]
 
-        disp_df = f_df.copy()
-        disp_df["Oznaka"] = disp_df["Is_New"].apply(lambda x: "✨ NOVO" if x else "")
-        disp_df = disp_df.drop(columns=['Naziv_Norm', 'Vreme_Broj', 'Is_New'], errors='ignore')
-        cols = ["Adresa", "Platforma", "Naziv", "Status", "Ocena", "Vreme dostave", "Oznaka", "Link"]
-        disp_df = disp_df[cols]
+        # Vizuelno označavanje u tabeli
+        f_df_copy = f_df.copy()
+        f_df_copy["Oznaka"] = f_df_copy["Is_New"].apply(lambda x: "✨ NOVO" if x else "")
 
         st.dataframe(
-            disp_df.style.map(lambda v: f'color: {"#27ae60" if v=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status']), 
+            f_df_copy[["Adresa", "Platforma", "Naziv", "Status", "Ocena", "Vreme dostave", "Oznaka", "Link"]].style.map(lambda v: f'color: {"#27ae60" if v=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status']), 
             use_container_width=True, hide_index=True,
             column_config={"Link": st.column_config.LinkColumn("Link", display_text="Otvori na sajtu")}
         )
@@ -711,8 +681,10 @@ if st.session_state.pokrenuto:
             pc = st.columns(4)
             for i, p in enumerate(st.session_state.pdf_fajlovi):
                 with pc[i % 4]:
-                    with open(p, "rb") as f: st.download_button(f"Preuzmi {os.path.basename(p)}", f.read(), os.path.basename(p), "application/pdf", key=f"p_{i}")
+                    with open(p, "rb") as f: 
+                        st.download_button(f"Preuzmi {os.path.basename(p)}", f.read(), os.path.basename(p), "application/pdf", key=f"p_{i}")
 
+    # TAJMER BEZ BLINKANJA
     rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
     while rem > 0:
         mins, secs = divmod(rem, 60)
