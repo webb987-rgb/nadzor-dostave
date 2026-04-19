@@ -369,46 +369,75 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
         else: pokusaji = 0
     return list(results_dict.values())
 
-# ---------------- SCRAPERS (VRAĆENA CISTA SESIJA PER ADRESA) ----------------
-async def scrape_wolt(browser, address, log_ph=None):
-    context = None
+# ---------------- SCRAPERS (SA AMNEZIJOM) ----------------
+async def scrape_wolt(context, address, log_ph=None):
     try:
-        context = await browser.new_context(
-            permissions=['geolocation'],
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
         page = await context.new_page()
         await page.goto("https://wolt.com/sr/srb")
+        
+        # AMNEZIJA: Brišemo pamćenje o lokaciji
+        try:
+            await page.evaluate("window.localStorage.clear(); window.sessionStorage.clear();")
+            await page.goto("https://wolt.com/sr/srb")
+        except: pass
+        
         try: await page.locator("[data-test-id='allow-button']").click(timeout=3000)
         except: pass
-        input_f = page.get_by_role("combobox"); await input_f.click(); await input_f.fill(address); await asyncio.sleep(2); await page.keyboard.press("ArrowDown"); await page.keyboard.press("Enter")
-        await asyncio.sleep(5); await page.goto("https://wolt.com/sr/discovery/restaurants")
+        
+        # Smanjen timeout na 8s da ne čeka 30s ako pukne
+        input_f = page.get_by_role("combobox")
+        await input_f.click(timeout=8000)
+        await input_f.fill(address)
+        await asyncio.sleep(2)
+        await page.keyboard.press("ArrowDown")
+        await page.keyboard.press("Enter")
+        await asyncio.sleep(5)
+        await page.goto("https://wolt.com/sr/discovery/restaurants")
         try: await page.wait_for_selector("a[data-test-id^='venueCard.']", timeout=10000)
         except: pass
+        
         rez = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", address, log_ph)
+        await page.close()
         return rez
     except Exception as e: 
         log_msg(f"[WOLT GREŠKA] {e}", log_ph)
         return []
-    finally:
-        if context: await context.close()
 
-async def scrape_glovo(browser, address, log_ph=None):
-    context = None
+async def scrape_glovo(context, address, log_ph=None):
     try:
-        context = await browser.new_context(
-            permissions=['geolocation'],
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
         page = await context.new_page()
-        await page.goto("https://glovoapp.com/sr/rs")
-        try: await page.get_by_role("button", name=re.compile("Accept|Prihvati", re.I)).click(timeout=3000)
+        await page.goto("https://glovoapp.com/sr/rs", wait_until="domcontentloaded")
+        
+        # AMNEZIJA: Brišemo pamćenje o staroj lokaciji da bismo dobili početni ekran
+        try:
+            await page.evaluate("window.localStorage.clear(); window.sessionStorage.clear();")
+            await asyncio.sleep(1)
+            await page.goto("https://glovoapp.com/sr/rs", wait_until="domcontentloaded")
         except: pass
         
-        await page.locator("#hero-container-input").click(timeout=10000)
-        search = page.get_by_role("searchbox")
-        await search.fill(address)
+        try: await page.get_by_role("button", name=re.compile("Accept|Prihvati", re.I)).click(timeout=4000)
+        except: pass
         
+        # POKUŠAJ 1: Tražimo standardno polje na čistoj početnoj stranici
+        try:
+            await page.locator("#hero-container-input").click(timeout=6000)
+            search = page.get_by_role("searchbox")
+            await search.fill(address)
+        except:
+            # POKUŠAJ 2: Ako je amnezija omanula, klikćemo adresu gore levo u zaglavlju (Header)
+            log_msg(f"[GLOVO] Pokušaj unosa preko Headera za {address}", log_ph)
+            try:
+                header_btn = page.locator('header div[role="button"]').first
+                await header_btn.click(timeout=5000)
+                await asyncio.sleep(2)
+                search_modal = page.get_by_role("searchbox").last
+                await search_modal.click(timeout=5000)
+                await search_modal.fill(address)
+            except Exception as e:
+                log_msg(f"[GLOVO ODUSTAJEM] Ne mogu naći polje za adresu: {e}", log_ph)
+                await page.close()
+                return []
+
         try:
             dropdown_item = page.locator("div[data-actionable='true'][role='button']").first
             await dropdown_item.wait_for(state="visible", timeout=8000)
@@ -443,14 +472,13 @@ async def scrape_glovo(browser, address, log_ph=None):
         
         await asyncio.sleep(5)
         rez = await pametno_skrolovanje_i_ekstrakcija(page, "Glovo", address, log_ph)
+        await page.close()
         return rez
     except Exception as e: 
         log_msg(f"[GLOVO GREŠKA] {e}", log_ph)
         return []
-    finally:
-        if context: await context.close()
 
-# ---------------- PDF LOGIC (BEZBEDNE PETLJE BEZ LIST COMPREHENSION BAGOVA) ----------------
+# ---------------- PDF LOGIC ----------------
 def format_pdf_stavka(tekst, status, stil):
     boja = "#27ae60" if status == "Otvoreno" else "#e74c3c"
     return Paragraph(f"<font color='{boja}' size=16>&bull;</font> {tekst}", stil)
@@ -547,18 +575,25 @@ async def proces_skeniranja(adrese, log_ph):
             args=["--disable-blink-features=AutomationControlled"]
         ) 
         
+        # JEDNA SESIJA ZA SVE ADRESE (DELI CLOUDFLARE COOKIES)
+        context = await browser.new_context(
+            permissions=['geolocation'],
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        
         for i, adr in enumerate(adrese):
-            if i > 0:
-                log_msg("⏳ Čistim memoriju i čekam 15s pre sledeće adrese (Anti-Bot)...", log_ph)
-                await asyncio.sleep(15)
-                
             log_msg(f"\n[SISTEM] Pokrecem skeniranje za: {adr}", log_ph)
             r = await asyncio.gather(
-                scrape_wolt(browser, adr, log_ph), 
-                scrape_glovo(browser, adr, log_ph)
+                scrape_wolt(context, adr, log_ph), 
+                scrape_glovo(context, adr, log_ph)
             )
             sve.extend(r[0] + r[1])
             
+            # Kratka pauza između tabova
+            if i < len(adrese) - 1:
+                await asyncio.sleep(3)
+                
+        await context.close()
         await browser.close()
             
     if sve:
