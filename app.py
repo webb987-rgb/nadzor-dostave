@@ -325,48 +325,60 @@ def izvuci_vreme_dostave(tekst):
         return "-", np.nan
     except: return "-", np.nan
 
+# RENDGEN LOVAC NA AKCIJE (Zavlači se u HTML)
 def izvuci_akciju(tekst, html, plat):
-    if not tekst: return "-"
+    if not tekst and not html: return "-"
     akcije = []
     
-    # Delimo tekst po novim redovima
-    lines = [line.strip() for line in tekst.split('\n') if line.strip()]
+    # 1. Uzimamo vidljiv tekst
+    lines = []
+    if tekst:
+        lines.extend([line.strip() for line in tekst.split('\n') if line.strip()])
+        
+    # 2. RENDGEN: Iščupaj skriveni tekst (Wolt bedževi)
+    if html:
+        skriveni = re.findall(r'(?:aria-label|alt|title)="([^"]+)"', html, re.IGNORECASE)
+        lines.extend([s.strip() for s in skriveni if s.strip()])
+        
+    sve_zajedno = (tekst + " " + html).lower() if tekst or html else ""
     
     for line in lines:
         t_low = line.lower()
         
-        # 1. Besplatna dostava (SRB/ENG)
-        if any(x in t_low for x in ["besplatna dostava", "free delivery", "dostava 0 rsd", "dostava 0 din"]):
+        # A. Besplatna dostava
+        if any(x in t_low for x in ["besplatna dostava", "free delivery", "dostava 0", "delivery 0", "0 rsd delivery"]):
             akcije.append("Besplatna dostava")
             
-        # 2. 1+1 Gratis
-        elif "1+1" in t_low or "1 + 1" in t_low:
+        # B. 1+1 Gratis
+        elif "1+1" in t_low or "1 + 1" in t_low or "buy 1 get 1" in t_low:
             akcije.append("1+1 Gratis")
             
-        # 3. Procenti (-30%, 20% discount, 15% popust, 30% off)
-        elif "%" in t_low and any(x in t_low for x in ["popust", "off", "discount", "-"]):
+        # C. Procenti (Sada prolazi BILO KOJA linija koja ima % i broj!)
+        elif "%" in t_low and re.search(r'\d', t_low):
+            # Isključi samo ako je Glovo ocena
+            if plat == "Glovo" and re.fullmatch(r'\d{1,3}\s*%', t_low):
+                continue
             akcije.append(line)
             
-        # 4. Fiksni iznosi (400 RSD off, -300 din, 200 RSD popust, spend 1000)
+        # D. Fiksni popusti u dinarima
         elif any(x in t_low for x in ["rsd", "din"]):
-            if any(x in t_low for x in ["popust", "off", "ušted", "usted", "spend", "preko"]) or t_low.startswith("-") or " - " in t_low:
+            if any(x in t_low for x in ["popust", "off", "discount", "save", "ušted", "spend", "potroš", "preko"]) or t_low.startswith("-"):
                 akcije.append(line)
 
-    # 5. Globalne pretplate (Wolt+ i Prime)
-    sve_zajedno = (tekst + " " + html).lower()
+    # E. Globalne pretplate
     if "wolt+" in sve_zajedno and not any("wolt+" in a.lower() for a in akcije):
         akcije.append("Wolt+")
     if "prime" in sve_zajedno and not any("prime" in a.lower() for a in akcije):
         akcije.append("Prime")
         
-    # Spajanje i brisanje duplikata - formatiramo u listu sa tackicama
+    # Formatiranje u spisak sa tačkicama
     if akcije:
         seen = set()
         res = []
         for a in akcije:
             a_clean = re.sub(r'<[^>]+>', '', a).strip()
-            if a_clean.lower() == "besplatna dostava" and "Besplatna dostava" in seen:
-                continue
+            if "besplatna dostava" in a_clean.lower() or "free delivery" in a_clean.lower() or "dostava 0" in a_clean.lower():
+                a_clean = "Besplatna dostava"
             if a_clean not in seen and a_clean != "":
                 seen.add(a_clean)
                 res.append(f"• {a_clean}")
@@ -460,7 +472,6 @@ async def scrape_wolt(context_wolt, address, log_ph=None, error_screenshots=None
         except: pass
         
         try:
-            # Pokušaj 1: Nismo ulogovani (ili smo na početnoj strani)
             input_f = page.get_by_role("combobox").first
             await input_f.wait_for(state="visible", timeout=4000)
             await input_f.click(timeout=3000)
@@ -474,10 +485,8 @@ async def scrape_wolt(context_wolt, address, log_ph=None, error_screenshots=None
             except PlaywrightTimeoutError: pass
             
         except PlaywrightTimeoutError:
-            # Pokušaj 2: VIP mod! Ulogovani smo, Wolt nas je odmah bacio na restorane. Menjamo adresu u Headeru!
             log_msg(f"[WOLT] VIP mod (Ulogovan). Menjam adresu u header-u za: {address}", log_ph)
             try:
-                # Nalazimo dugme sa adresom u zaglavlju
                 header_btn = page.locator("[data-test-id='header.address-select-button']")
                 if not await header_btn.is_visible():
                     header_btn = page.locator("header [role='button']").first
@@ -486,7 +495,6 @@ async def scrape_wolt(context_wolt, address, log_ph=None, error_screenshots=None
                 await header_btn.click()
                 await asyncio.sleep(1)
 
-                # Polje za pretragu unutar modala
                 search_modal = page.locator("[data-test-id='address-picker-input']")
                 if not await search_modal.is_visible():
                     search_modal = page.get_by_role("combobox").last
@@ -500,7 +508,6 @@ async def scrape_wolt(context_wolt, address, log_ph=None, error_screenshots=None
                 await page.keyboard.press("Enter")
                 await asyncio.sleep(5)
                 
-                # Obavezno prelazimo na restorane ako nismo već tamo
                 await page.goto("https://wolt.com/sr/discovery/restaurants")
                 try: await page.wait_for_selector("a[data-test-id^='venueCard.']", timeout=8000)
                 except PlaywrightTimeoutError: pass
