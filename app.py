@@ -275,7 +275,7 @@ def izvuci_ime(tekst):
         line_lower = line.lower()
         if "min" in line_lower and re.search(r'\d+', line_lower): continue
         if "rsd" in line_lower or "din" in line_lower: continue
-        if any(x in line_lower for x in ["promo", "novo", "odlično", "besplatna dostava", "artikli", "narudžb", "narudzb", "popust"]): continue
+        if any(x in line_lower for x in ["promo", "novo", "odlično", "besplatna dostava", "artikli", "narudžb", "narudzb", "popust", "off", "discount"]): continue
         if len(line) >= 2: return line
     return ""
 
@@ -325,7 +325,6 @@ def izvuci_vreme_dostave(tekst):
         return "-", np.nan
     except: return "-", np.nan
 
-# NADOGRAĐEN LINIJSKI LOVAC NA AKCIJE (Srpski + Engleski + Novi Redovi)
 def izvuci_akciju(tekst, html, plat):
     if not tekst: return "-"
     akcije = []
@@ -360,20 +359,19 @@ def izvuci_akciju(tekst, html, plat):
     if "prime" in sve_zajedno and not any("prime" in a.lower() for a in akcije):
         akcije.append("Prime")
         
-    # Spajanje i brisanje duplikata - koristimo "bullet" format za svaki novi red
+    # Spajanje i brisanje duplikata - formatiramo u listu sa tackicama
     if akcije:
         seen = set()
         res = []
         for a in akcije:
-            # Čistimo HTML ostatke
             a_clean = re.sub(r'<[^>]+>', '', a).strip()
             if a_clean.lower() == "besplatna dostava" and "Besplatna dostava" in seen:
                 continue
             if a_clean not in seen and a_clean != "":
                 seen.add(a_clean)
-                res.append(f"• {a_clean}") # Dodata tačkica za bolju preglednost
+                res.append(f"• {a_clean}")
         if res:
-            return "\n".join(res) # Svaka akcija u novom redu
+            return "\n".join(res)
     return "-"
 
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', ime.lower())
@@ -462,8 +460,9 @@ async def scrape_wolt(context_wolt, address, log_ph=None, error_screenshots=None
         except: pass
         
         try:
-            input_f = page.get_by_role("combobox")
-            await input_f.wait_for(state="visible", timeout=5000)
+            # Pokušaj 1: Nismo ulogovani (ili smo na početnoj strani)
+            input_f = page.get_by_role("combobox").first
+            await input_f.wait_for(state="visible", timeout=4000)
             await input_f.click(timeout=3000)
             await input_f.fill(address)
             await asyncio.sleep(2)
@@ -474,17 +473,51 @@ async def scrape_wolt(context_wolt, address, log_ph=None, error_screenshots=None
             try: await page.wait_for_selector("a[data-test-id^='venueCard.']", timeout=8000)
             except PlaywrightTimeoutError: pass
             
-            rez = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", address, log_ph)
-            return rez
         except PlaywrightTimeoutError:
-            log_msg(f"[WOLT TIMEOUT] Odustajem od adrese {address} zbog sporog učitavanja.", log_ph)
-            if page and error_screenshots is not None:
-                try:
-                    err_path = str(ERRORS_DIR / f"Wolt_Timeout_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
-                    await page.screenshot(path=err_path)
-                    error_screenshots.append(err_path)
-                except: pass
-            return []
+            # Pokušaj 2: VIP mod! Ulogovani smo, Wolt nas je odmah bacio na restorane. Menjamo adresu u Headeru!
+            log_msg(f"[WOLT] VIP mod (Ulogovan). Menjam adresu u header-u za: {address}", log_ph)
+            try:
+                # Nalazimo dugme sa adresom u zaglavlju
+                header_btn = page.locator("[data-test-id='header.address-select-button']")
+                if not await header_btn.is_visible():
+                    header_btn = page.locator("header [role='button']").first
+                    
+                await header_btn.wait_for(state="visible", timeout=5000)
+                await header_btn.click()
+                await asyncio.sleep(1)
+
+                # Polje za pretragu unutar modala
+                search_modal = page.locator("[data-test-id='address-picker-input']")
+                if not await search_modal.is_visible():
+                    search_modal = page.get_by_role("combobox").last
+                    
+                await search_modal.wait_for(state="visible", timeout=5000)
+                await search_modal.click()
+                await search_modal.fill(address)
+
+                await asyncio.sleep(2)
+                await page.keyboard.press("ArrowDown")
+                await page.keyboard.press("Enter")
+                await asyncio.sleep(5)
+                
+                # Obavezno prelazimo na restorane ako nismo već tamo
+                await page.goto("https://wolt.com/sr/discovery/restaurants")
+                try: await page.wait_for_selector("a[data-test-id^='venueCard.']", timeout=8000)
+                except PlaywrightTimeoutError: pass
+                
+            except PlaywrightTimeoutError:
+                log_msg(f"[WOLT ODUSTAJEM] Ne mogu da nadjem polje za promenu adrese.", log_ph)
+                if page and error_screenshots is not None:
+                    try:
+                        err_path = str(ERRORS_DIR / f"Wolt_Timeout_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
+                        await page.screenshot(path=err_path)
+                        error_screenshots.append(err_path)
+                    except: pass
+                return []
+                
+        rez = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", address, log_ph)
+        return rez
+
     except Exception as e: 
         log_msg(f"[WOLT GREŠKA] {e}", log_ph)
         if page and error_screenshots is not None:
