@@ -325,33 +325,49 @@ def izvuci_vreme_dostave(tekst):
         return "-", np.nan
     except: return "-", np.nan
 
-# NOVO: PAMETNO IZVLAČENJE PROMO AKCIJA
-def izvuci_akciju(tekst):
+# LINIJSKI LOVAC NA AKCIJE (Rešava Glovo duple popuste)
+def izvuci_akciju(tekst, html, plat):
     if not tekst: return "-"
-    t_low = tekst.lower()
     akcije = []
     
-    if "besplatna dostava" in t_low or "free delivery" in t_low or "dostava 0 rsd" in t_low or "dostava 0 din" in t_low:
-        akcije.append("Besplatna dostava")
+    # Delimo tekst po novim redovima da svaka Glovo 'značka' bude svoja stavka
+    lines = [line.strip() for line in tekst.split('\n') if line.strip()]
+    
+    for line in lines:
+        t_low = line.lower()
         
-    match_procenat = re.search(r'(-\s*\d{1,2}\s*%|\b\d{1,2}\s*%\s*popust|\b\d{1,2}\s*%\s*off)', t_low)
-    if match_procenat:
-        akcije.append(match_procenat.group(1).replace(" ", "").upper())
-        
-    if "1+1" in t_low or "1 + 1" in t_low:
-        akcije.append("1+1 Gratis")
-        
-    match_rsd = re.search(r'(-\d{3,4}\s*(rsd|din)|popust\s*\d{3,4}\s*(rsd|din))', t_low)
-    if match_rsd:
-        akcije.append(match_rsd.group(1).upper())
-        
-    if "wolt+" in t_low:
+        # 1. Besplatna dostava
+        if any(x in t_low for x in ["besplatna dostava", "free delivery", "dostava 0 rsd", "dostava 0 din"]):
+            akcije.append("Besplatna dostava")
+            
+        # 2. 1+1 Gratis
+        elif "1+1" in t_low or "1 + 1" in t_low:
+            akcije.append("1+1 Gratis")
+            
+        # 3. Procenti (Uzimamo celu liniju da zadržimo 'Prime' ili 'neki artikli' kontekst)
+        elif re.search(r'(-\s*\d{1,2}\s*%|\b\d{1,2}\s*%\s*popust|\b\d{1,2}\s*%\s*off)', t_low):
+            akcije.append(line)
+            
+        # 4. Fiksni iznosi (RSD / DIN)
+        elif re.search(r'(-\d{3,4}\s*(rsd|din)|popust\s*\d{3,4}\s*(rsd|din))', t_low):
+            akcije.append(line)
+
+    # 5. Globalne pretplate (ako Wolt+ ili Prime nisu vec uhvaceni u procentima)
+    sve_zajedno = (tekst + " " + html).lower()
+    if "wolt+" in sve_zajedno and not any("wolt+" in a.lower() for a in akcije):
         akcije.append("Wolt+")
-    if "prime" in t_low:
+    if "prime" in sve_zajedno and not any("prime" in a.lower() for a in akcije):
         akcije.append("Prime")
         
+    # Spajanje i brisanje duplikata
     if akcije:
-        return " | ".join(akcije)
+        seen = set()
+        res = []
+        for a in akcije:
+            if a not in seen:
+                seen.add(a)
+                res.append(a)
+        return " | ".join(res)
     return "-"
 
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', ime.lower())
@@ -375,7 +391,7 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
                 let rez = [];
                 document.querySelectorAll("a:has(h3), a[data-testid='store-card'], .store-card a").forEach(c => {
                     let link = c.href;
-                    if (!link.includes('/dostava') && !link.includes('/category')) { rez.push({link: link, text: c.innerText, html: ""}); }
+                    if (!link.includes('/dostava') && !link.includes('/category')) { rez.push({link: link, text: c.innerText, html: c.innerHTML}); }
                 });
                 return rez;
             }''')
@@ -383,20 +399,24 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
         for item in podaci:
             link = item['link']
             if not link or link in results_dict: continue
+            
             text = item['text']
-            sve_z = text + " " + item['html'] if plat == "Wolt" else text
+            html_content = item.get('html', '')
+            sve_z = text + " " + html_content
             
             ime = ukloni_kvacice(izvuci_ime(text))
             if len(ime) < 2: continue
             
             ocena = izvuci_ocenu(sve_z, plat)
             vreme_str, vreme_num = izvuci_vreme_dostave(sve_z)
-            akcija_str = izvuci_akciju(sve_z)
+            
+            # NOVI ALGORITAM ZA AKCIJE
+            akcija_str = izvuci_akciju(text, html_content, plat)
             
             is_new = False
             t_low = text.strip().lower()
             if plat == "Wolt":
-                is_new = bool(re.search(r'>\s*(novo|new)\s*<', item['html'].lower())) or (ocena == "Novo")
+                is_new = bool(re.search(r'>\s*(novo|new)\s*<', html_content.lower())) or (ocena == "Novo")
             else:
                 is_new = t_low.endswith('new') or t_low.endswith('novo') or bool(re.search(r'•.*?new\b', t_low)) or (ocena == "Novo")
 
@@ -433,8 +453,6 @@ async def scrape_wolt(context_wolt, address, log_ph=None, error_screenshots=None
         page.set_default_timeout(10000)
         
         await page.goto("https://wolt.com/sr/srb")
-        
-        # OBRISAN KOD ZA AMNEZIJU ZBOG ULOGOVANOG NALOGA! Ne brisemo memoriju!
         
         try: await page.locator("[data-test-id='allow-button']").click(timeout=3000)
         except: pass
@@ -495,8 +513,6 @@ async def scrape_glovo(context_glovo, address, log_ph=None, error_screenshots=No
                     error_screenshots.append(err_path)
                 except: pass
             return []
-            
-        # OBRISAN KOD ZA AMNEZIJU ZBOG ULOGOVANOG NALOGA! Ne brisemo memoriju!
         
         try: await page.get_by_role("button", name=re.compile("Accept|Prihvati", re.I)).click(timeout=3000)
         except: pass
@@ -680,7 +696,6 @@ async def proces_skeniranja(adrese, log_ph):
             args=["--disable-blink-features=AutomationControlled"]
         ) 
         
-        # WOLT VIP PROVERA
         if os.path.exists(WOLT_AUTH_FILE):
             log_msg("🔐 WOLT: Učitana VIP propusnica (Ulogovani ste!).", log_ph)
             context_wolt = await browser.new_context(
@@ -695,7 +710,6 @@ async def proces_skeniranja(adrese, log_ph):
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
 
-        # GLOVO VIP PROVERA
         if os.path.exists(GLOVO_AUTH_FILE):
             log_msg("🔐 GLOVO: Učitana VIP propusnica (Ulogovani ste!).", log_ph)
             context_glovo = await browser.new_context(
@@ -854,11 +868,9 @@ if st.session_state.pokrenuto:
         disp_df["Oznaka"] = disp_df["Is_New"].apply(lambda x: "✨ NOVO" if x else "")
         disp_df = disp_df.drop(columns=['Naziv_Norm', 'Vreme_Broj', 'Is_New'], errors='ignore')
         
-        # DODATA KOLONA "AKCIJA" U PRIKAZ
         cols = ["Adresa", "Platforma", "Naziv", "Status", "Ocena", "Vreme dostave", "Akcija", "Oznaka", "Link"]
         disp_df = disp_df[cols]
 
-        # ISTICANJE STATUSA I AKCIJE BOJOM
         def style_rows(row):
             styles = [''] * len(row)
             status_idx = row.index.get_loc('Status')
