@@ -325,18 +325,18 @@ def izvuci_vreme_dostave(tekst):
         return "-", np.nan
     except: return "-", np.nan
 
-# LINIJSKI LOVAC NA AKCIJE (Rešava Glovo duple popuste)
+# NADOGRAĐEN LINIJSKI LOVAC NA AKCIJE (Srpski + Engleski + Novi Redovi)
 def izvuci_akciju(tekst, html, plat):
     if not tekst: return "-"
     akcije = []
     
-    # Delimo tekst po novim redovima da svaka Glovo 'značka' bude svoja stavka
+    # Delimo tekst po novim redovima
     lines = [line.strip() for line in tekst.split('\n') if line.strip()]
     
     for line in lines:
         t_low = line.lower()
         
-        # 1. Besplatna dostava
+        # 1. Besplatna dostava (SRB/ENG)
         if any(x in t_low for x in ["besplatna dostava", "free delivery", "dostava 0 rsd", "dostava 0 din"]):
             akcije.append("Besplatna dostava")
             
@@ -344,30 +344,36 @@ def izvuci_akciju(tekst, html, plat):
         elif "1+1" in t_low or "1 + 1" in t_low:
             akcije.append("1+1 Gratis")
             
-        # 3. Procenti (Uzimamo celu liniju da zadržimo 'Prime' ili 'neki artikli' kontekst)
-        elif re.search(r'(-\s*\d{1,2}\s*%|\b\d{1,2}\s*%\s*popust|\b\d{1,2}\s*%\s*off)', t_low):
+        # 3. Procenti (-30%, 20% discount, 15% popust, 30% off)
+        elif "%" in t_low and any(x in t_low for x in ["popust", "off", "discount", "-"]):
             akcije.append(line)
             
-        # 4. Fiksni iznosi (RSD / DIN)
-        elif re.search(r'(-\d{3,4}\s*(rsd|din)|popust\s*\d{3,4}\s*(rsd|din))', t_low):
-            akcije.append(line)
+        # 4. Fiksni iznosi (400 RSD off, -300 din, 200 RSD popust, spend 1000)
+        elif any(x in t_low for x in ["rsd", "din"]):
+            if any(x in t_low for x in ["popust", "off", "ušted", "usted", "spend", "preko"]) or t_low.startswith("-") or " - " in t_low:
+                akcije.append(line)
 
-    # 5. Globalne pretplate (ako Wolt+ ili Prime nisu vec uhvaceni u procentima)
+    # 5. Globalne pretplate (Wolt+ i Prime)
     sve_zajedno = (tekst + " " + html).lower()
     if "wolt+" in sve_zajedno and not any("wolt+" in a.lower() for a in akcije):
         akcije.append("Wolt+")
     if "prime" in sve_zajedno and not any("prime" in a.lower() for a in akcije):
         akcije.append("Prime")
         
-    # Spajanje i brisanje duplikata
+    # Spajanje i brisanje duplikata - koristimo "bullet" format za svaki novi red
     if akcije:
         seen = set()
         res = []
         for a in akcije:
-            if a not in seen:
-                seen.add(a)
-                res.append(a)
-        return " | ".join(res)
+            # Čistimo HTML ostatke
+            a_clean = re.sub(r'<[^>]+>', '', a).strip()
+            if a_clean.lower() == "besplatna dostava" and "Besplatna dostava" in seen:
+                continue
+            if a_clean not in seen and a_clean != "":
+                seen.add(a_clean)
+                res.append(f"• {a_clean}") # Dodata tačkica za bolju preglednost
+        if res:
+            return "\n".join(res) # Svaka akcija u novom redu
     return "-"
 
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', ime.lower())
@@ -409,8 +415,6 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
             
             ocena = izvuci_ocenu(sve_z, plat)
             vreme_str, vreme_num = izvuci_vreme_dostave(sve_z)
-            
-            # NOVI ALGORITAM ZA AKCIJE
             akcija_str = izvuci_akciju(text, html_content, plat)
             
             is_new = False
@@ -860,9 +864,14 @@ if st.session_state.pokrenuto:
         with f1: fa = st.multiselect("📍 Adresa", df["Adresa"].unique(), df["Adresa"].unique())
         with f2: fp = st.multiselect("📱 Platforma", df["Platforma"].unique(), df["Platforma"].unique())
         with f3: fs = st.multiselect("🚦 Status", ["Otvoreno", "Zatvoreno"], ["Otvoreno", "Zatvoreno"])
-        filt_new = st.checkbox("✨ Prikazi samo NOVE restorane")
+        
+        c_filt1, c_filt2 = st.columns(2)
+        with c_filt1: filt_new = st.checkbox("✨ Prikaži samo NOVE restorane")
+        with c_filt2: filt_promo = st.checkbox("🔥 Prikaži samo restorane SA AKCIJAMA")
+        
         f_df = df[(df["Adresa"].isin(fa)) & (df["Platforma"].isin(fp)) & (df["Status"].isin(fs))]
         if filt_new: f_df = f_df[f_df["Is_New"] == True]
+        if filt_promo: f_df = f_df[f_df["Akcija"] != "-"]
 
         disp_df = f_df.copy()
         disp_df["Oznaka"] = disp_df["Is_New"].apply(lambda x: "✨ NOVO" if x else "")
@@ -886,7 +895,10 @@ if st.session_state.pokrenuto:
         st.dataframe(
             disp_df.style.apply(style_rows, axis=1), 
             use_container_width=True, hide_index=True,
-            column_config={"Link": st.column_config.LinkColumn("Link", display_text="Otvori na sajtu")}
+            column_config={
+                "Link": st.column_config.LinkColumn("Link", display_text="Otvori na sajtu"),
+                "Akcija": st.column_config.TextColumn("Akcija", width="large")
+            }
         )
 
         if st.session_state.pdf_fajlovi:
