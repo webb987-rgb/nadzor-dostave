@@ -54,8 +54,9 @@ HISTORY_FILE = OUTPUT_DIR / "istorija_dostave.csv"
 ERRORS_DIR = Path.cwd() / "greske"
 ERRORS_DIR.mkdir(parents=True, exist_ok=True)
 
-# FAJL ZA VIP GLOVO PROPUSNICU
+# FAJLOVI ZA VIP PROPUSNICE
 GLOVO_AUTH_FILE = "glovo_auth.json"
+WOLT_AUTH_FILE = "wolt_auth.json"
 # ========================================================
 
 def timestamp():
@@ -401,10 +402,8 @@ async def scrape_wolt(context_wolt, address, log_ph=None, error_screenshots=None
         page.set_default_timeout(10000)
         
         await page.goto("https://wolt.com/sr/srb")
-        try:
-            await page.evaluate("window.localStorage.clear(); window.sessionStorage.clear();")
-            await page.goto("https://wolt.com/sr/srb")
-        except: pass
+        
+        # OBRISAN KOD ZA AMNEZIJU ZBOG ULOGOVANOG NALOGA! Ne brisemo memoriju!
         
         try: await page.locator("[data-test-id='allow-button']").click(timeout=3000)
         except: pass
@@ -465,8 +464,6 @@ async def scrape_glovo(context_glovo, address, log_ph=None, error_screenshots=No
                     error_screenshots.append(err_path)
                 except: pass
             return []
-            
-        # OBRISAN KOD ZA AMNEZIJU ZBOG ULOGOVANOG NALOGA! Ne brisemo memoriju!
         
         try: await page.get_by_role("button", name=re.compile("Accept|Prihvati", re.I)).click(timeout=3000)
         except: pass
@@ -650,12 +647,22 @@ async def proces_skeniranja(adrese, log_ph):
             args=["--disable-blink-features=AutomationControlled"]
         ) 
         
-        context_wolt = await browser.new_context(
-            permissions=['geolocation'],
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-        
-        # PROVERA DA LI IMAMO GLOVO VIP FAJL
+        # WOLT VIP PROVERA
+        if os.path.exists(WOLT_AUTH_FILE):
+            log_msg("🔐 WOLT: Učitana VIP propusnica (Ulogovani ste!).", log_ph)
+            context_wolt = await browser.new_context(
+                storage_state=WOLT_AUTH_FILE,
+                permissions=['geolocation'],
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+        else:
+            log_msg("⚠️ WOLT: Nema VIP propusnice, radimo kao anoniman korisnik.", log_ph)
+            context_wolt = await browser.new_context(
+                permissions=['geolocation'],
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+
+        # GLOVO VIP PROVERA
         if os.path.exists(GLOVO_AUTH_FILE):
             log_msg("🔐 GLOVO: Učitana VIP propusnica (Ulogovani ste!).", log_ph)
             context_glovo = await browser.new_context(
