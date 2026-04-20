@@ -325,65 +325,72 @@ def izvuci_vreme_dostave(tekst):
         return "-", np.nan
     except: return "-", np.nan
 
-# RENDGEN LOVAC NA AKCIJE (Zavlači se u HTML)
+# HIBRIDNI LOVAC NA AKCIJE (Fino formatiranje + Brutalni Regex)
 def izvuci_akciju(tekst, html, plat):
     if not tekst and not html: return "-"
+    
+    # 1. PAMETNO TRAŽENJE (Čisti HTML tagove u nove redove da izvuče cele rečenice)
+    cist_html = re.sub(r'<[^>]+>', ' \n ', str(html))
+    sve_zajedno = str(tekst) + " \n " + cist_html
+    lines = [line.strip() for line in sve_zajedno.split('\n') if line.strip()]
+    
     akcije = []
-    
-    # 1. Uzimamo vidljiv tekst
-    lines = []
-    if tekst:
-        lines.extend([line.strip() for line in tekst.split('\n') if line.strip()])
-        
-    # 2. RENDGEN: Iščupaj skriveni tekst (Wolt bedževi)
-    if html:
-        skriveni = re.findall(r'(?:aria-label|alt|title)="([^"]+)"', html, re.IGNORECASE)
-        lines.extend([s.strip() for s in skriveni if s.strip()])
-        
-    sve_zajedno = (tekst + " " + html).lower() if tekst or html else ""
-    
     for line in lines:
         t_low = line.lower()
+        if len(t_low) > 80: continue # Ignorišemo predugačko đubre od koda
         
-        # A. Besplatna dostava
         if any(x in t_low for x in ["besplatna dostava", "free delivery", "dostava 0", "delivery 0", "0 rsd delivery"]):
             akcije.append("Besplatna dostava")
-            
-        # B. 1+1 Gratis
         elif "1+1" in t_low or "1 + 1" in t_low or "buy 1 get 1" in t_low:
             akcije.append("1+1 Gratis")
-            
-        # C. Procenti (Sada prolazi BILO KOJA linija koja ima % i broj!)
         elif "%" in t_low and re.search(r'\d', t_low):
-            # Isključi samo ako je Glovo ocena
-            if plat == "Glovo" and re.fullmatch(r'\d{1,3}\s*%', t_low):
+            if plat == "Glovo" and re.fullmatch(r'\d{1,3}\s*%', t_low): # Preskacemo gole ocene
                 continue
-            akcije.append(line)
-            
-        # D. Fiksni popusti u dinarima
+            if any(x in t_low for x in ["-", "off", "discount", "popust", "ušted", "usted"]) or t_low.startswith("-"):
+                akcije.append(line)
         elif any(x in t_low for x in ["rsd", "din"]):
-            if any(x in t_low for x in ["popust", "off", "discount", "save", "ušted", "spend", "potroš", "preko"]) or t_low.startswith("-"):
+            if any(x in t_low for x in ["-", "off", "discount", "popust", "save", "spend", "potroš", "preko"]):
                 akcije.append(line)
 
-    # E. Globalne pretplate
-    if "wolt+" in sve_zajedno and not any("wolt+" in a.lower() for a in akcije):
+    # 2. BRUTALNI REGEX FALLBACK (Ako su linije omanule, lomimo sve u kobasicu i tražimo!)
+    if not akcije:
+        t_low_sve = re.sub(r'<[^>]+>', ' ', str(tekst) + " " + str(html)).lower()
+        procenti = re.findall(r'(-\s*\d{1,2}\s*%|\b\d{1,2}\s*%\s*popust|\b\d{1,2}\s*%\s*off|\b\d{1,2}\s*%\s*discount)', t_low_sve)
+        iznosi = re.findall(r'(-\d{3,4}\s*(?:rsd|din)|\b\d{3,4}\s*(?:rsd|din)\s*off|spend\s*\d{3,4}\s*(?:rsd|din))', t_low_sve)
+        akcije.extend([p.strip() for p in procenti])
+        akcije.extend([i.strip() for i in iznosi])
+
+    # 3. GLOBALNE PRETPLATE
+    sve_low = (str(tekst) + " " + str(html)).lower()
+    if "wolt+" in sve_low and not any("wolt+" in a.lower() for a in akcije):
         akcije.append("Wolt+")
-    if "prime" in sve_zajedno and not any("prime" in a.lower() for a in akcije):
+    if "prime" in sve_low and not any("prime" in a.lower() for a in akcije):
         akcije.append("Prime")
         
-    # Formatiranje u spisak sa tačkicama
+    # 4. ULEPŠAVANJE I DODAVANJE TAČKICA
     if akcije:
         seen = set()
         res = []
         for a in akcije:
             a_clean = re.sub(r'<[^>]+>', '', a).strip()
-            if "besplatna dostava" in a_clean.lower() or "free delivery" in a_clean.lower() or "dostava 0" in a_clean.lower():
+            if not a_clean: continue
+            
+            # Sredjivanje velikih/malih slova
+            if "besplatna" in a_clean.lower() or "free" in a_clean.lower():
                 a_clean = "Besplatna dostava"
-            if a_clean not in seen and a_clean != "":
+            elif a_clean not in ["Wolt+", "Prime"]:
+                # Kapitalizacija prvog slova
+                a_clean = a_clean[0].upper() + a_clean[1:]
+                # Lepše formatiranje valuta i engleskih reci
+                a_clean = a_clean.replace("rsd", "RSD").replace("din", "DIN").replace("off", "Off").replace("discount", "Discount")
+
+            if a_clean not in seen:
                 seen.add(a_clean)
                 res.append(f"• {a_clean}")
+                
         if res:
             return "\n".join(res)
+            
     return "-"
 
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', ime.lower())
