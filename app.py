@@ -325,6 +325,35 @@ def izvuci_vreme_dostave(tekst):
         return "-", np.nan
     except: return "-", np.nan
 
+# NOVO: PAMETNO IZVLAČENJE PROMO AKCIJA
+def izvuci_akciju(tekst):
+    if not tekst: return "-"
+    t_low = tekst.lower()
+    akcije = []
+    
+    if "besplatna dostava" in t_low or "free delivery" in t_low or "dostava 0 rsd" in t_low or "dostava 0 din" in t_low:
+        akcije.append("Besplatna dostava")
+        
+    match_procenat = re.search(r'(-\s*\d{1,2}\s*%|\b\d{1,2}\s*%\s*popust|\b\d{1,2}\s*%\s*off)', t_low)
+    if match_procenat:
+        akcije.append(match_procenat.group(1).replace(" ", "").upper())
+        
+    if "1+1" in t_low or "1 + 1" in t_low:
+        akcije.append("1+1 Gratis")
+        
+    match_rsd = re.search(r'(-\d{3,4}\s*(rsd|din)|popust\s*\d{3,4}\s*(rsd|din))', t_low)
+    if match_rsd:
+        akcije.append(match_rsd.group(1).upper())
+        
+    if "wolt+" in t_low:
+        akcije.append("Wolt+")
+    if "prime" in t_low:
+        akcije.append("Prime")
+        
+    if akcije:
+        return " | ".join(akcije)
+    return "-"
+
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', ime.lower())
 
 # ---------------- PAMETNO SKROLOVANJE ----------------
@@ -356,11 +385,13 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
             if not link or link in results_dict: continue
             text = item['text']
             sve_z = text + " " + item['html'] if plat == "Wolt" else text
+            
             ime = ukloni_kvacice(izvuci_ime(text))
             if len(ime) < 2: continue
             
             ocena = izvuci_ocenu(sve_z, plat)
             vreme_str, vreme_num = izvuci_vreme_dostave(sve_z)
+            akcija_str = izvuci_akciju(sve_z)
             
             is_new = False
             t_low = text.strip().lower()
@@ -371,7 +402,7 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
 
             results_dict[link] = {
                 "Adresa": address, "Platforma": plat, "Naziv": ime, "Ocena": ocena,
-                "Vreme dostave": vreme_str, "Status": analiziraj_status(sve_z),
+                "Vreme dostave": vreme_str, "Akcija": akcija_str, "Status": analiziraj_status(sve_z),
                 "Vreme_Broj": vreme_num, "Is_New": is_new, "Link": link
             }
 
@@ -464,6 +495,8 @@ async def scrape_glovo(context_glovo, address, log_ph=None, error_screenshots=No
                     error_screenshots.append(err_path)
                 except: pass
             return []
+            
+        # OBRISAN KOD ZA AMNEZIJU ZBOG ULOGOVANOG NALOGA! Ne brisemo memoriju!
         
         try: await page.get_by_role("button", name=re.compile("Accept|Prihvati", re.I)).click(timeout=3000)
         except: pass
@@ -820,11 +853,26 @@ if st.session_state.pokrenuto:
         disp_df = f_df.copy()
         disp_df["Oznaka"] = disp_df["Is_New"].apply(lambda x: "✨ NOVO" if x else "")
         disp_df = disp_df.drop(columns=['Naziv_Norm', 'Vreme_Broj', 'Is_New'], errors='ignore')
-        cols = ["Adresa", "Platforma", "Naziv", "Status", "Ocena", "Vreme dostave", "Oznaka", "Link"]
+        
+        # DODATA KOLONA "AKCIJA" U PRIKAZ
+        cols = ["Adresa", "Platforma", "Naziv", "Status", "Ocena", "Vreme dostave", "Akcija", "Oznaka", "Link"]
         disp_df = disp_df[cols]
 
+        # ISTICANJE STATUSA I AKCIJE BOJOM
+        def style_rows(row):
+            styles = [''] * len(row)
+            status_idx = row.index.get_loc('Status')
+            akcija_idx = row.index.get_loc('Akcija')
+            
+            if row['Status'] == 'Otvoreno': styles[status_idx] = 'color: #27ae60; font-weight: bold;'
+            else: styles[status_idx] = 'color: #e74c3c; font-weight: bold;'
+                
+            if row['Akcija'] != '-': styles[akcija_idx] = 'color: #8e44ad; font-weight: bold;'
+            
+            return styles
+
         st.dataframe(
-            disp_df.style.map(lambda v: f'color: {"#27ae60" if v=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status']), 
+            disp_df.style.apply(style_rows, axis=1), 
             use_container_width=True, hide_index=True,
             column_config={"Link": st.column_config.LinkColumn("Link", display_text="Otvori na sajtu")}
         )
