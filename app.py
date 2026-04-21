@@ -438,13 +438,10 @@ def izvuci_akciju(tekst, html, plat):
 
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', ime.lower())
 
-# ---------------- PAMETNO SKROLOVANJE SA CIKLIČNIM CIMANJEM ----------------
+# ---------------- ORIGINALNO PAMETNO SKROLOVANJE (VRACENO NA POUZDANU VERZIJU) ----------------
 async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
     results_dict = {}
-    prethodni_broj = 0
-    pokusaji = 0
-    max_pokusaja = 12 # Povećana tolerancija na sporo učitavanje za velike gradove
-    
+    prethodni_broj = 0; pokusaji = 0
     while True:
         if plat == "Wolt":
             podaci = await page.evaluate('''() => {
@@ -496,26 +493,21 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
         trenutni = len(results_dict)
         if trenutni > prethodni_broj:
             log_msg(f"[{plat.upper()} - {address}] Učitano {trenutni} restorana...", log_ph)
-            prethodni_broj = trenutni
-            pokusaji = 0 # Resetujemo čim nađe nešto novo
-        else:
-            pokusaji += 1
-
-        # SKROLOVANJE - Ići do dna
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
-        await asyncio.sleep(1.5) # Dajemo mu vremena
-
-        # Ako 3 puta nismo ništa našli, uradi "Jiggle" (cimanje) da probudiš Lazy Loading
-        if pokusaji > 3:
-            await page.evaluate("window.scrollBy(0, -800);") # Skroluj gore
-            await asyncio.sleep(0.5)
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight);") # Skroluj opet do dna
-            await asyncio.sleep(2)
-
-        if pokusaji >= max_pokusaja:
-            log_msg(f"[{plat.upper()}] Došli smo do samog dna. Kraj skrolovanja.", log_ph)
-            break
+            prethodni_broj = trenutni; pokusaji = 0
             
+        await page.evaluate("window.scrollBy(0, window.innerHeight);")
+        await asyncio.sleep(0.8)
+        
+        h = await page.evaluate("document.body.scrollHeight")
+        s = await page.evaluate("window.scrollY + window.innerHeight")
+        
+        if s >= h - 100:
+            pokusaji += 1
+            await asyncio.sleep(1.5)
+            # Povecano sa 5 na 8 za vecu sigurnost kod ogromnih gradova, ali je originalna logika!
+            if pokusaji >= 8: break 
+        else: pokusaji = 0
+        
     return list(results_dict.values())
 
 # ---------------- SCRAPERS (STEALTH + FAST FAIL) ----------------
@@ -880,21 +872,39 @@ if 'df_history' not in st.session_state:
 st.title("🍔 Nadzor Dostave (Wolt & Glovo)")
 with st.sidebar:
     st.header("⚙️ Podešavanja")
-    adrese_input = st.text_area("📍 Adrese:", value="", placeholder="Makenzijeva 57, Beograd")
-    sleep_interval = st.number_input("⏱️ Spavanje (min):", min_value=1, value=15)
+    
+    adresa_1 = st.text_input("📍 Adresa 1 (Obavezna):", value="", placeholder="Makenzijeva 57, Beograd")
+    adresa_2 = st.text_input("📍 Adresa 2 (Opciona):", value="", placeholder="Somborska 5, Niš")
+    
+    auto_refresh = st.checkbox("🔄 Automatsko osvežavanje", value=False)
+    sleep_interval = st.number_input("⏱️ Interval (min):", min_value=1, value=60, disabled=not auto_refresh)
+    
     timer_ph = st.empty()
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("▶️ Pokreni", type="primary"): st.session_state.pokrenuto = True; st.session_state.last_run = 0; st.rerun()
+        if st.button("▶️ Pokreni", type="primary"): 
+            st.session_state.pokrenuto = True
+            st.session_state.last_run = 0
+            st.rerun()
     with c2:
-        if st.button("⏹️ Zaustavi"): st.session_state.pokrenuto = False; st.rerun()
+        if st.button("⏹️ Zaustavi"): 
+            st.session_state.pokrenuto = False
+            st.rerun()
     if st.button("🗑️ Obriši istoriju", use_container_width=True):
         if os.path.exists(HISTORY_FILE): os.remove(HISTORY_FILE)
         st.session_state.df_history = pd.DataFrame(); st.rerun()
 
 if st.session_state.pokrenuto:
-    lista_adresa = [cirilica_u_latinicu(a.strip()) for a in adrese_input.split('\n') if a.strip()]
-    if not lista_adresa: st.warning("Unesite bar jednu adresu!"); st.session_state.pokrenuto = False; st.rerun()
+    lista_adresa = []
+    if adresa_1.strip():
+        lista_adresa.append(cirilica_u_latinicu(adresa_1.strip()))
+    if adresa_2.strip():
+        lista_adresa.append(cirilica_u_latinicu(adresa_2.strip()))
+
+    if not adresa_1.strip(): 
+        st.warning("⚠️ Unesite bar prvu adresu (Adresa 1) da biste pokrenuli skeniranje!")
+        st.session_state.pokrenuto = False
+        st.rerun()
 
     now = time.time()
     if now - st.session_state.last_run >= sleep_interval * 60 or st.session_state.last_run == 0:
@@ -1056,11 +1066,16 @@ if st.session_state.pokrenuto:
                 with ec[idx % len(ec)]:
                     st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
 
-    rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
-    while rem > 0:
-        mins, secs = divmod(rem, 60)
-        timer_ph.info(f"⏳ Sledeće skeniranje za: **{mins:02d}:{secs:02d}**")
-        time.sleep(1); rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
-    st.rerun()
+    if auto_refresh:
+        rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
+        while rem > 0:
+            mins, secs = divmod(rem, 60)
+            timer_ph.info(f"⏳ Sledeće automatsko skeniranje za: **{mins:02d}:{secs:02d}**")
+            time.sleep(1)
+            rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
+        st.rerun()
+    else:
+        timer_ph.success("✅ Skeniranje završeno. Kliknite 'Pokreni' za novo skeniranje.")
+        
 else: 
-    st.info("Sistem zaustavljen. Unesite parametre i kliknite 'Pokreni'.")
+    st.info("Sistem je spreman. Unesite parametre i kliknite 'Pokreni'.")
