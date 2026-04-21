@@ -19,7 +19,6 @@ try:
     from zoneinfo import ZoneInfo
     LOCAL_TZ = ZoneInfo("Europe/Belgrade")
 except Exception:
-    # Fallback za sisteme koji nemaju instaliran zoneinfo paket (forsira +2 sata)
     LOCAL_TZ = datetime.timezone(datetime.timedelta(hours=2))
 
 def lokalno_vreme():
@@ -439,10 +438,13 @@ def izvuci_akciju(tekst, html, plat):
 
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', ime.lower())
 
-# ---------------- PAMETNO SKROLOVANJE ----------------
+# ---------------- PAMETNO SKROLOVANJE SA CIKLIČNIM CIMANJEM ----------------
 async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
     results_dict = {}
-    prethodni_broj = 0; pokusaji = 0
+    prethodni_broj = 0
+    pokusaji = 0
+    max_pokusaja = 12 # Povećana tolerancija na sporo učitavanje za velike gradove
+    
     while True:
         if plat == "Wolt":
             podaci = await page.evaluate('''() => {
@@ -494,18 +496,26 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
         trenutni = len(results_dict)
         if trenutni > prethodni_broj:
             log_msg(f"[{plat.upper()} - {address}] Učitano {trenutni} restorana...", log_ph)
-            prethodni_broj = trenutni; pokusaji = 0
-        
-        await page.evaluate("window.scrollBy(0, window.innerHeight);")
-        await asyncio.sleep(0.8)
-        
-        h = await page.evaluate("document.body.scrollHeight")
-        s = await page.evaluate("window.scrollY + window.innerHeight")
-        if s >= h - 100:
+            prethodni_broj = trenutni
+            pokusaji = 0 # Resetujemo čim nađe nešto novo
+        else:
             pokusaji += 1
-            await asyncio.sleep(1.5)
-            if pokusaji >= 5: break
-        else: pokusaji = 0
+
+        # SKROLOVANJE - Ići do dna
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
+        await asyncio.sleep(1.5) # Dajemo mu vremena
+
+        # Ako 3 puta nismo ništa našli, uradi "Jiggle" (cimanje) da probudiš Lazy Loading
+        if pokusaji > 3:
+            await page.evaluate("window.scrollBy(0, -800);") # Skroluj gore
+            await asyncio.sleep(0.5)
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight);") # Skroluj opet do dna
+            await asyncio.sleep(2)
+
+        if pokusaji >= max_pokusaja:
+            log_msg(f"[{plat.upper()}] Došli smo do samog dna. Kraj skrolovanja.", log_ph)
+            break
+            
     return list(results_dict.values())
 
 # ---------------- SCRAPERS (STEALTH + FAST FAIL) ----------------
@@ -933,7 +943,6 @@ if st.session_state.pokrenuto:
                     if cl: unikatne_akcije.add(cl)
         unikatne_akcije = sorted(list(unikatne_akcije))
         
-        # PODEŠAVANJE PODRAZUMEVANIH AKCIJA (SVE SELEKTOVANO)
         izabrani_popusti = st.multiselect("Odaberi akcije za prikaz na grafikonu:", unikatne_akcije, default=unikatne_akcije)
         st.image(kreiraj_grafikon_popusta(c_df, izabrani_popusti, "Broj restorana sa izabranim akcijama"), use_container_width=False)
         
