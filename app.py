@@ -14,6 +14,17 @@ import time
 import streamlit as st
 import sys
 
+# PODEŠAVANJE LOKALNOG VREMENA (Rešava problem 5 ujutru na Cloud serverima)
+try:
+    from zoneinfo import ZoneInfo
+    LOCAL_TZ = ZoneInfo("Europe/Belgrade")
+except Exception:
+    # Fallback za sisteme koji nemaju instaliran zoneinfo paket (forsira +2 sata)
+    LOCAL_TZ = datetime.timezone(datetime.timedelta(hours=2))
+
+def lokalno_vreme():
+    return datetime.datetime.now(LOCAL_TZ)
+
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
@@ -60,10 +71,10 @@ WOLT_AUTH_FILE = "wolt_auth.json"
 # ========================================================
 
 def timestamp():
-    return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return lokalno_vreme().strftime("%Y%m%d_%H%M%S")
 
 def format_time_short():
-    return datetime.datetime.now().strftime("%H:%M")
+    return lokalno_vreme().strftime("%H:%M")
 
 def log_msg(msg, placeholder=None):
     print(msg)
@@ -92,7 +103,7 @@ def posalji_email(pdf_putanje, primaoci_str, log_ph=None):
             msg = MIMEMultipart()
             msg['From'] = EMAIL_POSILJAOCA
             msg['To'] = primalac
-            msg['Subject'] = f"Izveštaji o dostavi - {datetime.datetime.now().strftime('%d.%m. u %H:%M')}"
+            msg['Subject'] = f"Izveštaji o dostavi - {lokalno_vreme().strftime('%d.%m. u %H:%M')}"
             body = "Pozdrav šefe,\n\nU prilogu se nalaze zbirni i pojedinačni izveštaji o statusu restorana na platformama Wolt i Glovo.\n\nSistem je uspešno završio ciklus."
             msg.attach(MIMEText(body, 'plain'))
 
@@ -117,7 +128,7 @@ def posalji_email(pdf_putanje, primaoci_str, log_ph=None):
 # ---------------- ISTORIJA I GRAFICI ----------------
 def sacuvaj_u_istoriju(df):
     vreme_sada = format_time_short()
-    datum_sada = datetime.datetime.now().strftime("%Y-%m-%d")
+    datum_sada = lokalno_vreme().strftime("%Y-%m-%d")
     istorija_podaci = []
     adrese = df["Adresa"].unique()
     for adr in adrese:
@@ -150,7 +161,6 @@ def kreiraj_timeline_grafikon(df_hist, adresa=None, custom_naslov=None, is_pdf=F
         naslov = f'Istorijat aktivnosti - {adresa.upper()}'
     else:
         if not df_sub.empty and 'Platforma' in df_sub.columns:
-            # Ako nema kolone Datum ili Vreme, ovo moze da pukne, pa se obezbedjujemo
             if 'Datum' in df_sub.columns and 'Vreme' in df_sub.columns:
                 df_sub = df_sub.groupby(["Datum", "Vreme", "Platforma"]).sum(numeric_only=True).reset_index()
         naslov = 'Zbirni Istorijat aktivnosti (Sve Adrese)'
@@ -263,7 +273,6 @@ def kreiraj_grafikon_vreme_dostave(df_sub, naslov):
     imgdata = BytesIO(); fig.savefig(imgdata, format='png', bbox_inches='tight', dpi=150); imgdata.seek(0); plt.close(fig)
     return imgdata
 
-# NOVI GRAFIKON ZA POPUSTE
 def kreiraj_grafikon_popusta(df_sub, izabrane_akcije, naslov):
     if not izabrane_akcije:
         fig, ax = plt.subplots(figsize=(8, 4), facecolor='#ffffff')
@@ -278,10 +287,8 @@ def kreiraj_grafikon_popusta(df_sub, izabrane_akcije, naslov):
     for _, row in df_sub.iterrows():
         akcije_restorana = []
         if pd.notna(row['Akcija']) and row['Akcija'] != "-":
-            # Čistimo od tačkica da bi se lepo poklopilo sa izabranim
             akcije_restorana = [a.replace("• ", "").strip() for a in str(row['Akcija']).split('\n') if a.strip()]
             
-        # Ako restoran ima MAKAR JEDNU od izabranih akcija, brojimo ga!
         if any(akcija in izabrane_akcije for akcija in akcije_restorana):
             if row['Platforma'] == 'Wolt':
                 wolt_count += 1
@@ -373,7 +380,6 @@ def izvuci_vreme_dostave(tekst):
 def izvuci_akciju(tekst, html, plat):
     if not tekst and not html: return "-"
     
-    # 1. PAMETNO TRAŽENJE (Čisti HTML tagove u nove redove da izvuče cele rečenice)
     cist_html = re.sub(r'<[^>]+>', ' \n ', str(html))
     sve_zajedno = str(tekst) + " \n " + cist_html
     lines = [line.strip() for line in sve_zajedno.split('\n') if line.strip()]
@@ -381,14 +387,14 @@ def izvuci_akciju(tekst, html, plat):
     akcije = []
     for line in lines:
         t_low = line.lower()
-        if len(t_low) > 80: continue # Ignorišemo predugačko đubre od koda
+        if len(t_low) > 80: continue 
         
         if any(x in t_low for x in ["besplatna dostava", "free delivery", "dostava 0", "delivery 0", "0 rsd delivery"]):
             akcije.append("Besplatna dostava")
         elif "1+1" in t_low or "1 + 1" in t_low or "buy 1 get 1" in t_low:
             akcije.append("1+1 Gratis")
         elif "%" in t_low and re.search(r'\d', t_low):
-            if plat == "Glovo" and re.fullmatch(r'\d{1,3}\s*%', t_low): # Preskacemo gole ocene
+            if plat == "Glovo" and re.fullmatch(r'\d{1,3}\s*%', t_low):
                 continue
             if any(x in t_low for x in ["-", "off", "discount", "popust", "ušted", "usted"]) or t_low.startswith("-"):
                 akcije.append(line)
@@ -396,7 +402,6 @@ def izvuci_akciju(tekst, html, plat):
             if any(x in t_low for x in ["-", "off", "discount", "popust", "save", "spend", "potroš", "preko"]):
                 akcije.append(line)
 
-    # 2. BRUTALNI REGEX FALLBACK 
     if not akcije:
         t_low_sve = re.sub(r'<[^>]+>', ' ', str(tekst) + " " + str(html)).lower()
         procenti = re.findall(r'(-\s*\d{1,2}\s*%|\b\d{1,2}\s*%\s*popust|\b\d{1,2}\s*%\s*off|\b\d{1,2}\s*%\s*discount)', t_low_sve)
@@ -404,14 +409,12 @@ def izvuci_akciju(tekst, html, plat):
         akcije.extend([p.strip() for p in procenti])
         akcije.extend([i.strip() for i in iznosi])
 
-    # 3. GLOBALNE PRETPLATE
     sve_low = (str(tekst) + " " + str(html)).lower()
     if "wolt+" in sve_low and not any("wolt+" in a.lower() for a in akcije):
         akcije.append("Wolt+")
     if "prime" in sve_low and not any("prime" in a.lower() for a in akcije):
         akcije.append("Prime")
         
-    # 4. ULEPŠAVANJE I DODAVANJE TAČKICA
     if akcije:
         seen = set()
         res = []
@@ -419,7 +422,6 @@ def izvuci_akciju(tekst, html, plat):
             a_clean = re.sub(r'<[^>]+>', '', a).strip()
             if not a_clean: continue
             
-            # Sredjivanje velikih/malih slova
             if "besplatna" in a_clean.lower() or "free" in a_clean.lower():
                 a_clean = "Besplatna dostava"
             elif a_clean not in ["Wolt+", "Prime"]:
@@ -897,7 +899,7 @@ if st.session_state.pokrenuto:
         for col in ["Vreme_Broj", "Vreme dostave", "Ocena", "Is_New"]:
             if col not in df.columns: df[col] = False if col == "Is_New" else (np.nan if "Broj" in col else "-")
 
-        st.success(f"✅ Osveženo u: {datetime.datetime.fromtimestamp(st.session_state.last_run).strftime('%H:%M:%S')}")
+        st.success(f"✅ Osveženo u: {datetime.datetime.fromtimestamp(st.session_state.last_run, LOCAL_TZ).strftime('%H:%M:%S')}")
         
         st.subheader("📊 Zbirni po Adresama")
         tc = st.columns(len(df["Adresa"].unique()))
@@ -922,7 +924,7 @@ if st.session_state.pokrenuto:
         
         st.markdown("---")
         st.markdown("##### 🎁 Analiza Popusta i Akcija")
-        # Izvlačenje svih unikatnih akcija za filter
+        
         unikatne_akcije = set()
         for akcija_str in c_df['Akcija']:
             if pd.notna(akcija_str) and str(akcija_str) != "-":
@@ -931,7 +933,8 @@ if st.session_state.pokrenuto:
                     if cl: unikatne_akcije.add(cl)
         unikatne_akcije = sorted(list(unikatne_akcije))
         
-        izabrani_popusti = st.multiselect("Odaberi akcije za prikaz na grafikonu:", unikatne_akcije, default=unikatne_akcije[:3] if len(unikatne_akcije) > 0 else [])
+        # PODEŠAVANJE PODRAZUMEVANIH AKCIJA (SVE SELEKTOVANO)
+        izabrani_popusti = st.multiselect("Odaberi akcije za prikaz na grafikonu:", unikatne_akcije, default=unikatne_akcije)
         st.image(kreiraj_grafikon_popusta(c_df, izabrani_popusti, "Broj restorana sa izabranim akcijama"), use_container_width=False)
         
         st.markdown("---")
