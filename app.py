@@ -442,12 +442,10 @@ def izvuci_akciju(tekst, html, plat):
 
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', ime.lower())
 
-# ---------------- NOVA LOGIKA SKROLOVANJA SA CIMANJEM GORE-DOLE ----------------
-async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
+# ---------------- ORIGINALNO PAMETNO SKROLOVANJE (Vraćeno na FINAL verziju) ----------------
+async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, prog_bar=None):
     results_dict = {}
-    prethodni_broj = 0
-    pokusaji_na_dnu = 0
-    
+    prethodni_broj = 0; pokusaji = 0
     while True:
         if plat == "Wolt":
             podaci = await page.evaluate('''() => {
@@ -499,35 +497,27 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
         trenutni = len(results_dict)
         if trenutni > prethodni_broj:
             log_msg(f"[{plat.upper()} - {address}] Učitano {trenutni} restorana...", log_ph)
-            prethodni_broj = trenutni
-            pokusaji_na_dnu = 0  # Čim nadje nove, resetujemo brojač cimanja
+            if prog_bar:
+                # Vizuelni loading bar (max postavljen na 1500)
+                prog_val = min(trenutni / 1500.0, 1.0)
+                prog_bar.progress(prog_val, text=f"[{plat.upper()}] Skrolujem '{address}'... Učitano {trenutni} restorana")
+            prethodni_broj = trenutni; pokusaji = 0
             
+        await page.evaluate("window.scrollBy(0, window.innerHeight);")
+        await asyncio.sleep(0.8)
+        
         h = await page.evaluate("document.body.scrollHeight")
         s = await page.evaluate("window.scrollY + window.innerHeight")
-        
-        if s >= h - 150:
-            # Stigli smo do dna stranice
-            pokusaji_na_dnu += 1
-            
-            if pokusaji_na_dnu >= 3:
-                log_msg(f"[{plat.upper()}] Dno je provjereno 3 puta bez novih restorana. Kraj skrolovanja.", log_ph)
-                break
-                
-            # Logika "Cimanja" da prevarimo senzor
-            await page.evaluate("window.scrollBy(0, -800);") # Skroluj gore
-            await asyncio.sleep(2) # Sačekaj par sekundi
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight);") # Zakucaj na dno
-            await asyncio.sleep(3) # Sačekaj da uvuče nove restorane
-            
-        else:
-            # Nismo još na dnu, nastavi normalno spuštanje ekran po ekran
-            await page.evaluate("window.scrollBy(0, window.innerHeight);")
-            await asyncio.sleep(0.8)
+        if s >= h - 100:
+            pokusaji += 1
+            await asyncio.sleep(1.5)
+            if pokusaji >= 5: break
+        else: pokusaji = 0
         
     return list(results_dict.values())
 
 # ---------------- SCRAPERS (STEALTH + FAST FAIL) ----------------
-async def scrape_wolt(context_wolt, address, log_ph=None, error_screenshots=None):
+async def scrape_wolt(context_wolt, address, log_ph=None, error_screenshots=None, prog_bar=None):
     page = None
     try:
         page = await context_wolt.new_page()
@@ -535,6 +525,7 @@ async def scrape_wolt(context_wolt, address, log_ph=None, error_screenshots=None
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page.set_default_timeout(10000)
         
+        if prog_bar: prog_bar.progress(0.05, text=f"[WOLT] Otvaram sajt za adresu: {address}...")
         await page.goto("https://wolt.com/sr/srb")
         
         try: await page.locator("[data-test-id='allow-button']").click(timeout=3000)
@@ -591,7 +582,7 @@ async def scrape_wolt(context_wolt, address, log_ph=None, error_screenshots=None
                     except: pass
                 return []
                 
-        rez = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", address, log_ph)
+        rez = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", address, log_ph, prog_bar)
         return rez
 
     except Exception as e: 
@@ -606,7 +597,7 @@ async def scrape_wolt(context_wolt, address, log_ph=None, error_screenshots=None
     finally:
         if page: await page.close()
 
-async def scrape_glovo(context_glovo, address, log_ph=None, error_screenshots=None):
+async def scrape_glovo(context_glovo, address, log_ph=None, error_screenshots=None, prog_bar=None):
     page = None
     try:
         page = await context_glovo.new_page()
@@ -614,6 +605,7 @@ async def scrape_glovo(context_glovo, address, log_ph=None, error_screenshots=No
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page.set_default_timeout(10000)
         
+        if prog_bar: prog_bar.progress(0.05, text=f"[GLOVO] Otvaram sajt za adresu: {address}...")
         await page.goto("https://glovoapp.com/sr/rs", wait_until="domcontentloaded")
         
         stranica_tekst = await page.content()
@@ -694,9 +686,9 @@ async def scrape_glovo(context_glovo, address, log_ph=None, error_screenshots=No
             await kat_link.click()
         except PlaywrightTimeoutError: pass
         
-        await asyncio.sleep(8)
+        await asyncio.sleep(5) # Vraćeno na sigurnih 5 sekundi pauze pre početka
         page.set_default_timeout(60000) 
-        rez = await pametno_skrolovanje_i_ekstrakcija(page, "Glovo", address, log_ph)
+        rez = await pametno_skrolovanje_i_ekstrakcija(page, "Glovo", address, log_ph, prog_bar)
         return rez
     except Exception as e: 
         log_msg(f"[GLOVO GREŠKA] {e}", log_ph)
@@ -799,7 +791,7 @@ def napravi_zbirni_pdf(df, df_hist):
     doc.build(elements); return p_path
 
 # ---------------- SEKVENCIJALNI PROCES SKENIRANJA (SPAS ZA RAM) ----------------
-async def proces_skeniranja(adrese, log_ph, generisi_pdf=False, email_primaoca=""):
+async def proces_skeniranja(adrese, log_ph, prog_bar, generisi_pdf=False, email_primaoca=""):
     sve = []
     error_screenshots = [] 
     
@@ -837,16 +829,16 @@ async def proces_skeniranja(adrese, log_ph, generisi_pdf=False, email_primaoca="
                 
             log_msg(f"\n[SISTEM] Pokrećem skeniranje za: {adr}", log_ph)
             
-            # SEKVENCIJALNO: Prvo ide GLOVO, pa tek onda WOLT (Drastična ušteda RAM-a)
+            # SEKVENCIJALNO: Prvo ide GLOVO, pa tek onda WOLT
             log_msg("📱 Skrolujem GLOVO...", log_ph)
             context_glovo = await browser.new_context(**glovo_args)
-            r_glovo = await scrape_glovo(context_glovo, adr, log_ph, error_screenshots)
+            r_glovo = await scrape_glovo(context_glovo, adr, log_ph, error_screenshots, prog_bar)
             sve.extend(r_glovo)
-            await context_glovo.close() # Zatvaramo Glovo da bi oslobodili RAM
+            await context_glovo.close() # Zatvaramo Glovo
             
             log_msg("🚲 Skrolujem WOLT...", log_ph)
             context_wolt = await browser.new_context(**wolt_args)
-            r_wolt = await scrape_wolt(context_wolt, adr, log_ph, error_screenshots)
+            r_wolt = await scrape_wolt(context_wolt, adr, log_ph, error_screenshots, prog_bar)
             sve.extend(r_wolt)
             await context_wolt.close() # Zatvaramo Wolt
                 
@@ -859,6 +851,7 @@ async def proces_skeniranja(adrese, log_ph, generisi_pdf=False, email_primaoca="
         pdf_fajlovi = []
         if generisi_pdf:
             log_msg("Generišem PDF izveštaje...", log_ph)
+            if prog_bar: prog_bar.progress(1.0, text="Generišem PDF izvještaje...")
             zbirni = napravi_zbirni_pdf(df_s, df_h)
             if zbirni: pdf_fajlovi.append(zbirni)
             
@@ -933,11 +926,15 @@ if st.session_state.pokrenuto:
 
     now = time.time()
     if now - st.session_state.last_run >= sleep_interval * 60 or st.session_state.last_run == 0:
-        timer_ph.warning("⏳ Skeniranje...")
+        timer_ph.warning("⏳ Skeniranje u toku...")
         sl = st.empty()
         
-        df, hi, pdf, err_imgs = asyncio.run(proces_skeniranja(lista_adresa, sl, generisi_pdf, email_unos))
+        # VIZUELNI LOADING BAR
+        prog_bar = st.progress(0.0, text="Priprema sistema za skeniranje...")
         
+        df, hi, pdf, err_imgs = asyncio.run(proces_skeniranja(lista_adresa, sl, prog_bar, generisi_pdf, email_unos))
+        
+        prog_bar.empty() # Uklanjamo loading bar kad završi
         st.session_state.df_sve, st.session_state.df_history, st.session_state.pdf_fajlovi, st.session_state.error_screenshots, st.session_state.last_run = df, hi, pdf, err_imgs, time.time()
         sl.empty(); st.rerun()
 
