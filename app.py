@@ -7,6 +7,7 @@ import re
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import random
 from io import BytesIO
 from pathlib import Path
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
@@ -333,6 +334,7 @@ def izvuci_ime(tekst):
 def analiziraj_status(text):
     t = text.lower()
     
+    # SPASAVANJE RESTORANA: Uskoro se zatvara = Otvoreno
     if any(x in t for x in ["uskoro se zatvara", "closing soon", "zatvara se za", "closes in"]):
         return "Otvoreno"
         
@@ -510,16 +512,13 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, pr
             log_msg(f"[{plat.upper()} - {address}] Učitano {trenutni} restorana...", log_ph)
             
             if prog_bar:
-                # Vizuelni loading bar (max postavljen na 1500)
                 prog_val = min(trenutni / 1500.0, 1.0)
-                # Održavamo na 99% dok se zaista ne završi
                 if prog_val == 1.0: prog_val = 0.99 
                 prog_bar.progress(prog_val, text=f"[{plat.upper()}] Skeniram '{address}'... Pronađeno: {trenutni} restorana")
                 
             prethodni_broj = trenutni
             pokusaji_na_dnu = 0
             
-        # LJUDSKI SKROL: Spuštamo se konstantno po 500 piksela na svakih pola sekunde
         await page.evaluate("window.scrollBy(0, 500);")
         await asyncio.sleep(0.5)
         
@@ -527,11 +526,9 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, pr
         s = await page.evaluate("window.scrollY + window.innerHeight")
         
         if s >= h - 50:
-            # Stigli smo do dna, čekamo da sajt učita nove (vrti onaj kružić)
             pokusaji_na_dnu += 1
             await asyncio.sleep(1.5)
             
-            # Ako smo 5 puta zaredom sačekali na dnu i nema novih, to je kraj!
             if pokusaji_na_dnu >= 5: 
                 break 
         
@@ -850,7 +847,6 @@ async def proces_skeniranja(adrese, log_ph, prog_bar, generisi_pdf=False, email_
                 
             log_msg(f"\n[SISTEM] Pokrećem skeniranje za: {adr}", log_ph)
             
-            # SEKVENCIJALNO: Prvo ide GLOVO, pa tek onda WOLT
             log_msg("📱 Skrolujem GLOVO...", log_ph)
             context_glovo = await browser.new_context(**glovo_args)
             await context_glovo.route("**/*", pametni_dijetalni_mod)
@@ -898,6 +894,7 @@ if 'last_run' not in st.session_state: st.session_state.last_run = 0
 if 'df_sve' not in st.session_state: st.session_state.df_sve = pd.DataFrame()
 if 'pdf_fajlovi' not in st.session_state: st.session_state.pdf_fajlovi = []
 if 'error_screenshots' not in st.session_state: st.session_state.error_screenshots = []
+if 'loaded_history' not in st.session_state: st.session_state.loaded_history = False
 
 if 'df_history' not in st.session_state: 
     if os.path.exists(HISTORY_FILE):
@@ -925,47 +922,86 @@ with st.sidebar:
     with c1:
         if st.button("▶️ Pokreni", type="primary"): 
             st.session_state.pokrenuto = True
+            st.session_state.loaded_history = False
             st.session_state.last_run = 0
             st.rerun()
     with c2:
         if st.button("⏹️ Zaustavi"): 
             st.session_state.pokrenuto = False
             st.rerun()
+            
     if st.button("🗑️ Obriši istoriju", use_container_width=True):
         if os.path.exists(HISTORY_FILE): os.remove(HISTORY_FILE)
         st.session_state.df_history = pd.DataFrame(); st.rerun()
 
-if st.session_state.pokrenuto:
-    lista_adresa = []
-    if adresa_1.strip():
-        lista_adresa.append(cirilica_u_latinicu(adresa_1.strip()))
-    if adresa_2.strip():
-        lista_adresa.append(cirilica_u_latinicu(adresa_2.strip()))
+    # DODATO - ARHIVAR (ISTORIJA SKENIRANJA)
+    st.markdown("---")
+    st.header("📂 Stari izveštaji")
+    istorija_fajlovi = sorted(list(OUTPUT_DIR.glob("Detaljno_*.csv")), reverse=True)
+    
+    opcije = {"--- Izaberi ---": None}
+    for f in istorija_fajlovi:
+        ime = f.stem.replace("Detaljno_", "")
+        try:
+            dt_obj = datetime.datetime.strptime(ime, "%Y%m%d_%H%M%S")
+            prikaz = dt_obj.strftime("%d.%m.%Y u %H:%M:%S")
+        except:
+            prikaz = ime
+        opcije[prikaz] = f
 
-    if not adresa_1.strip(): 
-        st.warning("⚠️ Unesite bar prvu adresu (Adresa 1) da biste pokrenuli skeniranje!")
-        st.session_state.pokrenuto = False
-        st.rerun()
+    izabrani_fajl = st.selectbox("Učitaj prethodno skeniranje:", list(opcije.keys()))
+    if st.button("📂 Učitaj izveštaj"):
+        fajl = opcije[izabrani_fajl]
+        if fajl:
+            st.session_state.df_sve = pd.read_csv(fajl)
+            st.session_state.pokrenuto = False
+            st.session_state.loaded_history = True
+            st.session_state.last_run = os.path.getmtime(fajl)
+            st.rerun()
 
-    now = time.time()
-    if now - st.session_state.last_run >= sleep_interval * 60 or st.session_state.last_run == 0:
-        timer_ph.warning("⏳ Skeniranje u toku...")
-        sl = st.empty()
-        
-        prog_bar = st.progress(0.0, text="Priprema sistema za skeniranje...")
-        
-        df, hi, pdf, err_imgs = asyncio.run(proces_skeniranja(lista_adresa, sl, prog_bar, generisi_pdf, email_unos))
-        
-        prog_bar.empty()
-        st.session_state.df_sve, st.session_state.df_history, st.session_state.pdf_fajlovi, st.session_state.error_screenshots, st.session_state.last_run = df, hi, pdf, err_imgs, time.time()
-        sl.empty(); st.rerun()
+if st.session_state.pokrenuto or st.session_state.loaded_history:
 
+    # Skeniranje se pali SAMO ako je kliknuto dugme POKRENI
+    if st.session_state.pokrenuto:
+        lista_adresa = []
+        if adresa_1.strip():
+            lista_adresa.append(cirilica_u_latinicu(adresa_1.strip()))
+        if adresa_2.strip():
+            lista_adresa.append(cirilica_u_latinicu(adresa_2.strip()))
+
+        if not adresa_1.strip(): 
+            st.warning("⚠️ Unesite bar prvu adresu (Adresa 1) da biste pokrenuli skeniranje!")
+            st.session_state.pokrenuto = False
+            st.rerun()
+
+        now = time.time()
+        if now - st.session_state.last_run >= sleep_interval * 60 or st.session_state.last_run == 0:
+            timer_ph.warning("⏳ Skeniranje u toku...")
+            sl = st.empty()
+            
+            prog_bar = st.progress(0.0, text="Priprema sistema za skeniranje...")
+            
+            df, hi, pdf, err_imgs = asyncio.run(proces_skeniranja(lista_adresa, sl, prog_bar, generisi_pdf, email_unos))
+            
+            # SNIMANJE KOMPLETNOG IZVJEŠTAJA U ARHIVU
+            if not df.empty:
+                ts = timestamp()
+                df.to_csv(OUTPUT_DIR / f"Detaljno_{ts}.csv", index=False)
+
+            prog_bar.empty()
+            st.session_state.df_sve, st.session_state.df_history, st.session_state.pdf_fajlovi, st.session_state.error_screenshots, st.session_state.last_run = df, hi, pdf, err_imgs, time.time()
+            sl.empty(); st.rerun()
+
+    # PRIKAZ PODATAKA (Radi i za skeniranje i za arhivu)
     df = st.session_state.df_sve
     if not df.empty:
         for col in ["Vreme_Broj", "Vreme dostave", "Ocena", "Is_New"]:
             if col not in df.columns: df[col] = False if col == "Is_New" else (np.nan if "Broj" in col else "-")
 
-        st.success(f"✅ Osveženo u: {datetime.datetime.fromtimestamp(st.session_state.last_run, LOCAL_TZ).strftime('%H:%M:%S')}")
+        if st.session_state.loaded_history:
+            st.info("📂 **Prikazuje se učitani istorijski izveštaj.** Da biste skenirali ponovo, unesite adrese u meniju i kliknite 'Pokreni'.")
+        else:
+            st.success(f"✅ Osveženo u: {datetime.datetime.fromtimestamp(st.session_state.last_run, LOCAL_TZ).strftime('%H:%M:%S')}")
         
         st.subheader("📊 Zbirni po Adresama")
         tc = st.columns(len(df["Adresa"].unique()))
@@ -1076,11 +1112,13 @@ if st.session_state.pokrenuto:
         with c_filt2: filt_promo = st.checkbox("🔥 Prikaži samo restorane SA AKCIJAMA")
         
         f_df = df[(df["Adresa"].isin(fa)) & (df["Platforma"].isin(fp)) & (df["Status"].isin(fs))]
-        if filt_new: f_df = f_df[f_df["Is_New"] == True]
-        if filt_promo: f_df = f_df[f_df["Akcija"] != "-"]
+        if filt_new: 
+            f_df = f_df[f_df["Is_New"].isin([True, 'True', 'true', 1])]
+        if filt_promo: 
+            f_df = f_df[f_df["Akcija"] != "-"]
 
         disp_df = f_df.copy()
-        disp_df["Oznaka"] = disp_df["Is_New"].apply(lambda x: "✨ NOVO" if x else "")
+        disp_df["Oznaka"] = disp_df["Is_New"].apply(lambda x: "✨ NOVO" if x in [True, 'True', 'true', 1] else "")
         disp_df = disp_df.drop(columns=['Naziv_Norm', 'Vreme_Broj', 'Is_New'], errors='ignore')
         
         cols = ["Adresa", "Platforma", "Naziv", "Status", "Ocena", "Vreme dostave", "Akcija", "Oznaka", "Link"]
@@ -1107,14 +1145,14 @@ if st.session_state.pokrenuto:
             }
         )
 
-        if st.session_state.pdf_fajlovi:
+        if st.session_state.get('pdf_fajlovi'):
             st.markdown("---"); st.subheader("📥 PDF Izveštaji")
             pc = st.columns(4)
             for i, p in enumerate(st.session_state.pdf_fajlovi):
                 with pc[i % 4]:
                     with open(p, "rb") as f: st.download_button(f"Preuzmi {os.path.basename(p)}", f.read(), os.path.basename(p), "application/pdf", key=f"p_{i}")
                     
-        if st.session_state.error_screenshots:
+        if st.session_state.get('error_screenshots'):
             st.markdown("---")
             st.subheader("📸 Zabeležene greške (Screenshots)")
             st.warning("Prilikom posljednjeg skeniranja sistem je naišao na blokade. Pogledajte slike ekrana ispod:")
@@ -1123,16 +1161,18 @@ if st.session_state.pokrenuto:
                 with ec[idx % len(ec)]:
                     st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
 
-    if auto_refresh:
-        rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
-        while rem > 0:
-            mins, secs = divmod(rem, 60)
-            timer_ph.info(f"⏳ Sljedeće automatsko skeniranje za: **{mins:02d}:{secs:02d}**")
-            time.sleep(1)
+    # OSVJEŽAVANJE RADI SAMO KADA JE POKRENUT (Ne kad gledamo istoriju)
+    if st.session_state.pokrenuto:
+        if auto_refresh:
             rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
-        st.rerun()
-    else:
-        timer_ph.success("✅ Skeniranje završeno. Kliknite 'Pokreni' za novo skeniranje.")
+            while rem > 0:
+                mins, secs = divmod(rem, 60)
+                timer_ph.info(f"⏳ Sljedeće automatsko skeniranje za: **{mins:02d}:{secs:02d}**")
+                time.sleep(1)
+                rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
+            st.rerun()
+        else:
+            timer_ph.success("✅ Skeniranje završeno. Kliknite 'Pokreni' za novo skeniranje.")
         
 else: 
     st.info("Sistem je spreman. Unesite parametre i kliknite 'Pokreni'.")
