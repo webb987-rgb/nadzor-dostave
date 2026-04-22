@@ -7,7 +7,6 @@ import re
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import random  # <--- DODAT MODUL ZA LJUDSKO SKROLOVANJE
 from io import BytesIO
 from pathlib import Path
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
@@ -104,7 +103,7 @@ def posalji_email(pdf_putanje, primaoci_str, log_ph=None):
             msg['From'] = EMAIL_POSILJAOCA
             msg['To'] = primalac
             msg['Subject'] = f"Izveštaji o dostavi - {lokalno_vreme().strftime('%d.%m. u %H:%M')}"
-            body = "Pozdrav šefe,\n\nU prilogu se nalaze zbirni i pojedinačni izveštaji o statusu restorana na platformama Wolt i Glovo.\n\nSistem je uspešno završio ciklus."
+            body = "Pozdrav šefe,\n\nU prilogu se nalaze zbirni i pojedinačni izveštaji o statusu restorana na platformama Wolt i Glovo.\n\nSistem je uspješno završio ciklus."
             msg.attach(MIMEText(body, 'plain'))
 
             for pdf_putanja in pdf_putanje:
@@ -121,9 +120,9 @@ def posalji_email(pdf_putanje, primaoci_str, log_ph=None):
             text = msg.as_string()
             server.sendmail(EMAIL_POSILJAOCA, primalac, text)
             server.quit()
-        log_msg("[USPEH] Svi emailovi su uspešno poslati!", log_ph)
+        log_msg("[USPEH] Svi emailovi su uspješno poslati!", log_ph)
     except Exception as e:
-        log_msg(f"[GREŠKA] Slanje emaila nije uspelo: {e}", log_ph)
+        log_msg(f"[GREŠKA] Slanje emaila nije uspjelo: {e}", log_ph)
 
 # ---------------- ISTORIJA I GRAFICI ----------------
 def sacuvaj_u_istoriju(df):
@@ -334,7 +333,6 @@ def izvuci_ime(tekst):
 def analiziraj_status(text):
     t = text.lower()
     
-    # SPASAVANJE RESTORANA: Uskoro se zatvara = Otvoreno
     if any(x in t for x in ["uskoro se zatvara", "closing soon", "zatvara se za", "closes in"]):
         return "Otvoreno"
         
@@ -444,16 +442,22 @@ def izvuci_akciju(tekst, html, plat):
 
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', ime.lower())
 
+# ---------------- SPARTAN MOD V2: LAŽNI PIKSEL ----------------
+TINY_PNG = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
 
-# ---------------- PRAVO LJUDSKO SKROLOVANJE (Human-like Scrolling) ----------------
+async def pametni_dijetalni_mod(route):
+    if route.request.resource_type in ["image", "media"]:
+        await route.fulfill(status=200, content_type="image/png", body=TINY_PNG)
+    else:
+        await route.continue_()
+
+# ---------------- LJUDSKO SKROLOVANJE (Kopirano iz videa) ----------------
 async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, prog_bar=None):
     results_dict = {}
     prethodni_broj = 0
     pokusaji_na_dnu = 0
-    max_pokusaja = 15 # Veća tolerancija za ogromne gradove poput Beograda
     
     while True:
-        # 1. Ekstrakcija podataka
         if plat == "Wolt":
             podaci = await page.evaluate('''() => {
                 let rez = [];
@@ -473,7 +477,6 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, pr
                 return rez;
             }''')
 
-        # 2. Obrada i čuvanje podataka
         for item in podaci:
             link = item['link']
             if not link or link in results_dict: continue
@@ -505,42 +508,32 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, pr
         trenutni = len(results_dict)
         if trenutni > prethodni_broj:
             log_msg(f"[{plat.upper()} - {address}] Učitano {trenutni} restorana...", log_ph)
-            if prog_bar:
-                prog_val = min(trenutni / 1500.0, 1.0)
-                prog_bar.progress(prog_val, text=f"[{plat.upper()}] Skrolujem '{address}'... Učitano {trenutni} restorana")
-            prethodni_broj = trenutni
-            pokusaji_na_dnu = 0  # Pronađeno novo, resetujemo brojač grešaka
             
-        # 3. Provera pozicije i "Ljudsko Skrolovanje"
+            if prog_bar:
+                # Vizuelni loading bar (max postavljen na 1500)
+                prog_val = min(trenutni / 1500.0, 1.0)
+                # Održavamo na 99% dok se zaista ne završi
+                if prog_val == 1.0: prog_val = 0.99 
+                prog_bar.progress(prog_val, text=f"[{plat.upper()}] Skeniram '{address}'... Pronađeno: {trenutni} restorana")
+                
+            prethodni_broj = trenutni
+            pokusaji_na_dnu = 0
+            
+        # LJUDSKI SKROL: Spuštamo se konstantno po 500 piksela na svakih pola sekunde
+        await page.evaluate("window.scrollBy(0, 500);")
+        await asyncio.sleep(0.5)
+        
         h = await page.evaluate("document.body.scrollHeight")
         s = await page.evaluate("window.scrollY + window.innerHeight")
         
-        if s >= h - 150:
-            # Stigli smo do dna
+        if s >= h - 50:
+            # Stigli smo do dna, čekamo da sajt učita nove (vrti onaj kružić)
             pokusaji_na_dnu += 1
-            if pokusaji_na_dnu >= max_pokusaja:
-                log_msg(f"[{plat.upper()}] Dno je provjereno {max_pokusaja} puta. Kraj skrolovanja.", log_ph)
-                break
-                
-            # Ljudsko "cimanje" (Skrol malo gore pa malo dole da prevarimo senzor)
-            for _ in range(2):
-                skok_gore = random.randint(200, 400)
-                await page.evaluate(f"window.scrollBy(0, -{skok_gore});")
-                await asyncio.sleep(random.uniform(0.2, 0.4))
-            await asyncio.sleep(1)
-            for _ in range(3):
-                skok_dole = random.randint(200, 500)
-                await page.evaluate(f"window.scrollBy(0, {skok_dole});")
-                await asyncio.sleep(random.uniform(0.2, 0.5))
-            await asyncio.sleep(3) # Čekamo da server povuče nove podatke
+            await asyncio.sleep(1.5)
             
-        else:
-            # Nismo još na dnu - LJUDSKI SKROL (Simulacija vrtenja točkića miša)
-            for _ in range(random.randint(2, 4)):
-                skok = random.randint(200, 450)
-                await page.evaluate(f"window.scrollBy(0, {skok});")
-                await asyncio.sleep(random.uniform(0.1, 0.3))
-            await asyncio.sleep(random.uniform(0.4, 0.8))
+            # Ako smo 5 puta zaredom sačekali na dnu i nema novih, to je kraj!
+            if pokusaji_na_dnu >= 5: 
+                break 
         
     return list(results_dict.values())
 
@@ -714,7 +707,7 @@ async def scrape_glovo(context_glovo, address, log_ph=None, error_screenshots=No
             await kat_link.click()
         except PlaywrightTimeoutError: pass
         
-        await asyncio.sleep(8)
+        await asyncio.sleep(5)
         page.set_default_timeout(60000) 
         rez = await pametno_skrolovanje_i_ekstrakcija(page, "Glovo", address, log_ph, prog_bar)
         return rez
@@ -729,6 +722,94 @@ async def scrape_glovo(context_glovo, address, log_ph=None, error_screenshots=No
         return []
     finally:
         if page: await page.close()
+
+# ---------------- PDF LOGIC ----------------
+def format_pdf_stavka(tekst, status, stil):
+    boja = "#27ae60" if status == "Otvoreno" else "#e74c3c"
+    return Paragraph(f"<font color='{boja}' size=16>&bull;</font> {tekst}", stil)
+
+def napravi_pdf_za_adresu(df_adr, adr, df_hist):
+    p_path = str(OUTPUT_DIR / f"Izvestaj_{ukloni_kvacice(adr).replace(' ', '_')}_{timestamp()}.pdf")
+    doc = SimpleDocTemplate(p_path, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
+    styles = getSampleStyleSheet()
+    ns = ParagraphStyle('Naslov', parent=styles['Title'], textColor=colors.HexColor("#2c3e50"), fontSize=20, spaceAfter=10)
+    ps = ParagraphStyle('Podnaslov', parent=styles['Heading2'], textColor=colors.HexColor("#2980b9"), fontSize=16, spaceBefore=20, spaceAfter=15)
+    cs = ParagraphStyle('Cell', parent=styles['Normal'], fontSize=10, leading=14)
+
+    elements = [Paragraph(f"Izvestaj o Dostavi - {ukloni_kvacice(adr).upper()}", ns)]
+    tab = [["Platforma", "Ukupno Nadjeno", "Otvoreno", "Zatvoreno"]]
+    for plat in ["Wolt", "Glovo"]:
+        sub = df_adr[df_adr["Platforma"] == plat]
+        if not sub.empty: tab.append([plat, len(sub), len(sub[sub["Status"] == "Otvoreno"]), len(sub[sub["Status"] == "Zatvoreno"])])
+    
+    t_z = Table(tab, colWidths=[120, 100, 100, 100])
+    t_z.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.HexColor("#34495e")),('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),('ALIGN', (0,0), (-1,-1), 'CENTER'),('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#bdc3c7"))]))
+    
+    elements.extend([t_z, Spacer(1, 20), Table([[Image(kreiraj_grafikon_status(df_adr, f"Status - {adr}"), width=280, height=224)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), Spacer(1, 10), Table([[Image(kreiraj_timeline_grafikon(df_hist, adr, is_pdf=True), width=500, height=200)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), PageBreak()])
+
+    wn = {}
+    for _, r in df_adr[df_adr["Platforma"] == "Wolt"].iterrows():
+        wn[normalizuj_ime(r["Naziv"])] = r
+        
+    gn = {}
+    for _, r in df_adr[df_adr["Platforma"] == "Glovo"].iterrows():
+        gn[normalizuj_ime(r["Naziv"])] = r
+        
+    sva = set(wn.keys()).union(set(gn.keys()))
+    zaj = sorted([i for i in sva if i in wn and i in gn])
+    sw = sorted([i for i in sva if i in wn and i not in gn])
+    sg = sorted([i for i in sva if i in gn and i not in wn])
+
+    if zaj:
+        elements.append(Paragraph("Zajednicki Restorani", ps))
+        pz = [["Naziv", "Status Wolt", "Status Glovo"]]
+        for n in zaj: 
+            pz.append([Paragraph(wn[n]["Naziv"], cs), format_pdf_stavka(wn[n]["Status"], wn[n]["Status"], cs), format_pdf_stavka(gn[n]["Status"], gn[n]["Status"], cs)])
+        t_c = Table(pz, colWidths=[200, 130, 130])
+        t_c.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.HexColor("#2c3e50")), ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke), ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#bdc3c7"))]))
+        elements.extend([t_c, PageBreak()])
+        
+    if sw:
+        elements.append(Paragraph("Ekskluzivno na Woltu", ps))
+        pod = [["Naziv Restorana"]]
+        for n in sw: 
+            pod.append([format_pdf_stavka(wn[n]["Naziv"], wn[n]["Status"], cs)])
+        t_w = Table(pod, colWidths=[460])
+        t_w.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.HexColor("#3498db")), ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke), ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#bdc3c7"))]))
+        elements.extend([t_w, PageBreak()])
+        
+    if sg:
+        elements.append(Paragraph("Ekskluzivno na Glovu", ps))
+        pod = [["Naziv Restorana"]]
+        for n in sg: 
+            pod.append([format_pdf_stavka(gn[n]["Naziv"], gn[n]["Status"], cs)])
+        t_g = Table(pod, colWidths=[460])
+        t_g.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.HexColor("#f39c12")), ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke), ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#bdc3c7"))]))
+        elements.append(t_g)
+        
+    doc.build(elements)
+    return p_path
+
+def napravi_zbirni_pdf(df, df_hist):
+    p_path = str(OUTPUT_DIR / f"Zbirni_Izvestaj_{timestamp()}.pdf")
+    doc = SimpleDocTemplate(p_path, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
+    styles = getSampleStyleSheet()
+    ns = ParagraphStyle('Naslov', parent=styles['Title'], textColor=colors.HexColor("#2c3e50"), fontSize=20, spaceAfter=20)
+    ps = ParagraphStyle('Podnaslov', parent=styles['Heading2'], textColor=colors.HexColor("#2980b9"), fontSize=16, spaceBefore=20, spaceAfter=15)
+    
+    elements = [Paragraph("Zbirni Izvestaj - Sve Adrese", ns), Table([[Image(kreiraj_grafikon_status(df, "Ukupni Status"), width=280, height=224)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), Spacer(1, 10), Table([[Image(kreiraj_timeline_grafikon(df_hist, None, is_pdf=True), width=500, height=200)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), PageBreak()]
+    
+    for adr in df["Adresa"].unique():
+        df_a = df[df["Adresa"] == adr]
+        elements.append(Paragraph(f"Statistika za lokaciju: {ukloni_kvacice(adr).upper()}", ps))
+        tab = [["Platforma", "Ukupno Nadjeno", "Otvoreno", "Zatvoreno"]]
+        for plat in ["Wolt", "Glovo"]:
+            sub = df_a[df_a["Platforma"] == plat]
+            if not sub.empty: tab.append([plat, len(sub), len(sub[sub["Status"] == "Otvoreno"]), len(sub[sub["Status"] == "Zatvoreno"])])
+        t_a = Table(tab, colWidths=[120, 100, 100, 100])
+        t_a.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.HexColor("#34495e")),('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),('ALIGN', (0,0), (-1,-1), 'CENTER'),('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#bdc3c7"))]))
+        elements.extend([t_a, Spacer(1, 15), Table([[Image(kreiraj_grafikon_status(df_a, f"Trenutni Status - {adr}"), width=280, height=224)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), Spacer(1, 20)])
+    doc.build(elements); return p_path
 
 # ---------------- SEKVENCIJALNI PROCES SKENIRANJA (SPAS ZA RAM) ----------------
 async def proces_skeniranja(adrese, log_ph, prog_bar, generisi_pdf=False, email_primaoca=""):
@@ -772,12 +853,14 @@ async def proces_skeniranja(adrese, log_ph, prog_bar, generisi_pdf=False, email_
             # SEKVENCIJALNO: Prvo ide GLOVO, pa tek onda WOLT
             log_msg("📱 Skrolujem GLOVO...", log_ph)
             context_glovo = await browser.new_context(**glovo_args)
+            await context_glovo.route("**/*", pametni_dijetalni_mod)
             r_glovo = await scrape_glovo(context_glovo, adr, log_ph, error_screenshots, prog_bar)
             sve.extend(r_glovo)
             await context_glovo.close() 
             
             log_msg("🚲 Skrolujem WOLT...", log_ph)
             context_wolt = await browser.new_context(**wolt_args)
+            await context_wolt.route("**/*", pametni_dijetalni_mod)
             r_wolt = await scrape_wolt(context_wolt, adr, log_ph, error_screenshots, prog_bar)
             sve.extend(r_wolt)
             await context_wolt.close() 
