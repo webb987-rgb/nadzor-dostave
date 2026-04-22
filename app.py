@@ -332,6 +332,11 @@ def izvuci_ime(tekst):
 
 def analiziraj_status(text):
     t = text.lower()
+    
+    # SPASAVANJE RESTORANA: Ako piše da se uskoro zatvara, tretiramo ga kao OTVOREN!
+    if any(x in t for x in ["uskoro se zatvara", "closing soon", "zatvara se za", "closes in"]):
+        return "Otvoreno"
+        
     ind = [
         "samo preuzimanje", "samo za preuzimanje", "pickup only", 
         "dostava nije dostupna", "dostava trenutno nije", "samo licno preuzimanje",
@@ -438,7 +443,15 @@ def izvuci_akciju(tekst, html, plat):
 
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', ime.lower())
 
-# ---------------- ORIGINALNO PAMETNO SKROLOVANJE (VRACENO NA POUZDANU VERZIJU) ----------------
+# ---------------- SPARTAN MOD (Blokiranje nepotrebnog sadržaja za uštedu RAM-a) ----------------
+async def blokiraj_visak(route):
+    # Blokiramo slike, videa i fontove. Ostavljamo stylesheet da ne bi pukao Wolt layout koji može sakriti elemente.
+    if route.request.resource_type in ["image", "media", "font"]:
+        await route.abort()
+    else:
+        await route.continue_()
+
+# ---------------- ORIGINALNO PAMETNO SKROLOVANJE ----------------
 async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
     results_dict = {}
     prethodni_broj = 0; pokusaji = 0
@@ -504,7 +517,6 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
         if s >= h - 100:
             pokusaji += 1
             await asyncio.sleep(1.5)
-            # Povecano sa 5 na 8 za vecu sigurnost kod ogromnih gradova, ali je originalna logika!
             if pokusaji >= 8: break 
         else: pokusaji = 0
         
@@ -782,53 +794,56 @@ def napravi_zbirni_pdf(df, df_hist):
         elements.extend([t_a, Spacer(1, 15), Table([[Image(kreiraj_grafikon_status(df_a, f"Trenutni Status - {adr}"), width=280, height=224)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), Spacer(1, 20)])
     doc.build(elements); return p_path
 
-# ---------------- PROCES SKENIRANJA ----------------
-async def proces_skeniranja(adrese, log_ph):
+# ---------------- PROCES SKENIRANJA (OLAKŠAN ZA CLOUD) ----------------
+async def proces_skeniranja(adrese, log_ph, generisi_pdf=True):
     sve = []
     error_screenshots = [] 
     
     async with async_playwright() as p:
+        # DODATE CLOUD ZASTAVICE ZA ŠTEDNJU RAM-a
         browser = await p.chromium.launch(
             headless=True,
-            args=["--disable-blink-features=AutomationControlled"]
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage", # KLJUČNO ZA STREAMLIT!
+                "--no-sandbox",
+                "--disable-gpu",
+                "--disable-extensions",
+                "--mute-audio"
+            ]
         ) 
         
+        # PODEŠAVANJE WOLT KONTEKSTA
+        wolt_args = {
+            "permissions": ['geolocation'],
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
         if os.path.exists(WOLT_AUTH_FILE):
-            log_msg("🔐 WOLT: Učitana VIP propusnica (Ulogovani ste!).", log_ph)
-            context_wolt = await browser.new_context(
-                storage_state=WOLT_AUTH_FILE,
-                permissions=['geolocation'],
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
-        else:
-            log_msg("⚠️ WOLT: Nema VIP propusnice, radimo kao anoniman korisnik.", log_ph)
-            context_wolt = await browser.new_context(
-                permissions=['geolocation'],
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
+            log_msg("🔐 WOLT: Učitana VIP propusnica.", log_ph)
+            wolt_args["storage_state"] = WOLT_AUTH_FILE
+            
+        context_wolt = await browser.new_context(**wolt_args)
+        await context_wolt.route("**/*", blokiraj_visak) # Primena dijetalnog moda
 
+        # PODEŠAVANJE GLOVO KONTEKSTA
+        glovo_args = {
+            "permissions": ['geolocation'],
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "extra_http_headers": {"Accept-Language": "en-US,en;q=0.9,sr;q=0.8"}
+        }
         if os.path.exists(GLOVO_AUTH_FILE):
-            log_msg("🔐 GLOVO: Učitana VIP propusnica (Ulogovani ste!).", log_ph)
-            context_glovo = await browser.new_context(
-                storage_state=GLOVO_AUTH_FILE,
-                permissions=['geolocation'],
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                extra_http_headers={"Accept-Language": "en-US,en;q=0.9,sr;q=0.8"}
-            )
-        else:
-            log_msg("⚠️ GLOVO: Nema VIP propusnice, radimo kao anoniman korisnik.", log_ph)
-            context_glovo = await browser.new_context(
-                permissions=['geolocation'],
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                extra_http_headers={"Accept-Language": "en-US,en;q=0.9,sr;q=0.8"}
-            )
+            log_msg("🔐 GLOVO: Učitana VIP propusnica.", log_ph)
+            glovo_args["storage_state"] = GLOVO_AUTH_FILE
+            
+        context_glovo = await browser.new_context(**glovo_args)
+        await context_glovo.route("**/*", blokiraj_visak) # Primena dijetalnog moda
         
         for i, adr in enumerate(adrese):
             if i > 0:
                 log_msg("⏳ Pauza 5 sekundi izmedju adresa...", log_ph)
                 await asyncio.sleep(5)
                 
-            log_msg(f"\n[SISTEM] Pokrecem skeniranje za: {adr}", log_ph)
+            log_msg(f"\n[SISTEM] Pokrecem lagano skeniranje za: {adr}", log_ph)
             r = await asyncio.gather(
                 scrape_wolt(context_wolt, adr, log_ph, error_screenshots), 
                 scrape_glovo(context_glovo, adr, log_ph, error_screenshots)
@@ -842,16 +857,19 @@ async def proces_skeniranja(adrese, log_ph):
     if sve:
         df_s = pd.DataFrame(sve)
         df_h = sacuvaj_u_istoriju(df_s)
-        log_msg("Generisem PDF izvestaje...", log_ph)
         
         pdf_fajlovi = []
-        zbirni = napravi_zbirni_pdf(df_s, df_h)
-        if zbirni: pdf_fajlovi.append(zbirni)
-        
-        for adr in df_s["Adresa"].unique():
-            df_sub = df_s[df_s["Adresa"] == adr]
-            p_fajl = napravi_pdf_za_adresu(df_sub, adr, df_h)
-            if p_fajl: pdf_fajlovi.append(p_fajl)
+        if generisi_pdf:
+            log_msg("Generisem PDF izvestaje...", log_ph)
+            zbirni = napravi_zbirni_pdf(df_s, df_h)
+            if zbirni: pdf_fajlovi.append(zbirni)
+            
+            for adr in df_s["Adresa"].unique():
+                df_sub = df_s[df_s["Adresa"] == adr]
+                p_fajl = napravi_pdf_za_adresu(df_sub, adr, df_h)
+                if p_fajl: pdf_fajlovi.append(p_fajl)
+        else:
+            log_msg("Preskačem PDF izveštaje radi uštede memorije.", log_ph)
             
         return df_s, df_h, pdf_fajlovi, error_screenshots
     return pd.DataFrame(), pd.DataFrame(), [], error_screenshots
@@ -878,6 +896,8 @@ with st.sidebar:
     
     auto_refresh = st.checkbox("🔄 Automatsko osvežavanje", value=False)
     sleep_interval = st.number_input("⏱️ Interval (min):", min_value=1, value=60, disabled=not auto_refresh)
+    
+    generisi_pdf = st.checkbox("📄 Generiši PDF izveštaje (Gasi za veliki grad)", value=True)
     
     timer_ph = st.empty()
     c1, c2 = st.columns(2)
@@ -910,7 +930,10 @@ if st.session_state.pokrenuto:
     if now - st.session_state.last_run >= sleep_interval * 60 or st.session_state.last_run == 0:
         timer_ph.warning("⏳ Skeniranje...")
         sl = st.empty()
-        df, hi, pdf, err_imgs = asyncio.run(proces_skeniranja(lista_adresa, sl))
+        
+        # PROSLEDJIVANJE PDF ZASTAVICE
+        df, hi, pdf, err_imgs = asyncio.run(proces_skeniranja(lista_adresa, sl, generisi_pdf))
+        
         st.session_state.df_sve, st.session_state.df_history, st.session_state.pdf_fajlovi, st.session_state.error_screenshots, st.session_state.last_run = df, hi, pdf, err_imgs, time.time()
         sl.empty(); st.rerun()
 
@@ -987,6 +1010,12 @@ if st.session_state.pokrenuto:
 
         st.markdown("---")
         st.subheader("⚖️ Uporedni Prikaz (Restorani na obe platforme)")
+        
+        # NOVI FILTERI ZA UPOREDNI PRIKAZ
+        c_up1, c_up2 = st.columns(2)
+        with c_up1: filter_wolt_up = st.multiselect("🚦 Prikaz za Wolt:", ["Otvoreno", "Zatvoreno"], default=["Otvoreno", "Zatvoreno"], key="fw")
+        with c_up2: filter_glovo_up = st.multiselect("🚦 Prikaz za Glovo:", ["Otvoreno", "Zatvoreno"], default=["Otvoreno", "Zatvoreno"], key="fg")
+
         df['Naziv_Norm'] = df['Naziv'].apply(normalizuj_ime)
         uporedni_podaci = []
         for adr in df['Adresa'].unique():
@@ -1001,9 +1030,16 @@ if st.session_state.pokrenuto:
                     "Adresa": adr, "Naziv (Wolt)": w_row['Naziv'], "Status Wolt": w_row['Status'], "Vreme Wolt": w_row['Vreme dostave'], "Ocena Wolt": w_row['Ocena'], "Link Wolt": w_row['Link'],
                     "Naziv (Glovo)": g_row['Naziv'], "Status Glovo": g_row['Status'], "Vreme Glovo": g_row['Vreme dostave'], "Ocena Glovo": g_row['Ocena'], "Link Glovo": g_row['Link']
                 })
+        
         if uporedni_podaci:
             df_uporedni = pd.DataFrame(uporedni_podaci)
-            st.dataframe(df_uporedni.style.map(lambda val: f'color: {"#27ae60" if val=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status Wolt', 'Status Glovo']), use_container_width=True, hide_index=True, column_config={"Link Wolt": st.column_config.LinkColumn("Link Wolt", display_text="Otvori Wolt"), "Link Glovo": st.column_config.LinkColumn("Link Glovo", display_text="Otvori Glovo")})
+            # PRIMENA FILTERA NA UPOREDNI PRIKAZ
+            df_uporedni = df_uporedni[(df_uporedni['Status Wolt'].isin(filter_wolt_up)) & (df_uporedni['Status Glovo'].isin(filter_glovo_up))]
+            
+            if not df_uporedni.empty:
+                st.dataframe(df_uporedni.style.map(lambda val: f'color: {"#27ae60" if val=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status Wolt', 'Status Glovo']), use_container_width=True, hide_index=True, column_config={"Link Wolt": st.column_config.LinkColumn("Link Wolt", display_text="Otvori Wolt"), "Link Glovo": st.column_config.LinkColumn("Link Glovo", display_text="Otvori Glovo")})
+            else:
+                st.info("Nema restorana koji odgovaraju odabranim filterima statusa.")
         else:
             st.info("Nema restorana koji se nalaze na obe platforme za odabrane adrese.")
         st.markdown("---")
