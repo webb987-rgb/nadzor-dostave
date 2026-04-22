@@ -333,7 +333,7 @@ def izvuci_ime(tekst):
 def analiziraj_status(text):
     t = text.lower()
     
-    # SPASAVANJE RESTORANA: Ako piše da se uskoro zatvara, tretiramo ga kao OTVOREN!
+    # SPASAVANJE RESTORANA: Uskoro se zatvara = Otvoreno
     if any(x in t for x in ["uskoro se zatvara", "closing soon", "zatvara se za", "closes in"]):
         return "Otvoreno"
         
@@ -442,14 +442,6 @@ def izvuci_akciju(tekst, html, plat):
     return "-"
 
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', ime.lower())
-
-# ---------------- SPARTAN MOD (Blokiranje nepotrebnog sadržaja za uštedu RAM-a) ----------------
-async def blokiraj_visak(route):
-    # Blokiramo slike, videa i fontove. Ostavljamo stylesheet da ne bi pukao Wolt layout koji može sakriti elemente.
-    if route.request.resource_type in ["image", "media", "font"]:
-        await route.abort()
-    else:
-        await route.continue_()
 
 # ---------------- ORIGINALNO PAMETNO SKROLOVANJE ----------------
 async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None):
@@ -794,26 +786,21 @@ def napravi_zbirni_pdf(df, df_hist):
         elements.extend([t_a, Spacer(1, 15), Table([[Image(kreiraj_grafikon_status(df_a, f"Trenutni Status - {adr}"), width=280, height=224)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), Spacer(1, 20)])
     doc.build(elements); return p_path
 
-# ---------------- PROCES SKENIRANJA (OLAKŠAN ZA CLOUD) ----------------
+# ---------------- PROCES SKENIRANJA ----------------
 async def proces_skeniranja(adrese, log_ph, generisi_pdf=True):
     sve = []
     error_screenshots = [] 
     
     async with async_playwright() as p:
-        # DODATE CLOUD ZASTAVICE ZA ŠTEDNJU RAM-a
         browser = await p.chromium.launch(
             headless=True,
             args=[
                 "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage", # KLJUČNO ZA STREAMLIT!
-                "--no-sandbox",
-                "--disable-gpu",
-                "--disable-extensions",
-                "--mute-audio"
+                "--disable-dev-shm-usage", # Zaštita memorije za Cloud
+                "--no-sandbox"             # Zaštita memorije za Cloud
             ]
         ) 
         
-        # PODEŠAVANJE WOLT KONTEKSTA
         wolt_args = {
             "permissions": ['geolocation'],
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -823,9 +810,7 @@ async def proces_skeniranja(adrese, log_ph, generisi_pdf=True):
             wolt_args["storage_state"] = WOLT_AUTH_FILE
             
         context_wolt = await browser.new_context(**wolt_args)
-        await context_wolt.route("**/*", blokiraj_visak) # Primena dijetalnog moda
 
-        # PODEŠAVANJE GLOVO KONTEKSTA
         glovo_args = {
             "permissions": ['geolocation'],
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -836,14 +821,13 @@ async def proces_skeniranja(adrese, log_ph, generisi_pdf=True):
             glovo_args["storage_state"] = GLOVO_AUTH_FILE
             
         context_glovo = await browser.new_context(**glovo_args)
-        await context_glovo.route("**/*", blokiraj_visak) # Primena dijetalnog moda
         
         for i, adr in enumerate(adrese):
             if i > 0:
                 log_msg("⏳ Pauza 5 sekundi izmedju adresa...", log_ph)
                 await asyncio.sleep(5)
                 
-            log_msg(f"\n[SISTEM] Pokrecem lagano skeniranje za: {adr}", log_ph)
+            log_msg(f"\n[SISTEM] Pokrecem skeniranje za: {adr}", log_ph)
             r = await asyncio.gather(
                 scrape_wolt(context_wolt, adr, log_ph, error_screenshots), 
                 scrape_glovo(context_glovo, adr, log_ph, error_screenshots)
@@ -897,7 +881,7 @@ with st.sidebar:
     auto_refresh = st.checkbox("🔄 Automatsko osvežavanje", value=False)
     sleep_interval = st.number_input("⏱️ Interval (min):", min_value=1, value=60, disabled=not auto_refresh)
     
-    generisi_pdf = st.checkbox("📄 Generiši PDF izveštaje (Gasi za veliki grad)", value=True)
+    generisi_pdf = st.checkbox("📄 Generiši PDF izveštaje", value=True)
     
     timer_ph = st.empty()
     c1, c2 = st.columns(2)
@@ -931,7 +915,6 @@ if st.session_state.pokrenuto:
         timer_ph.warning("⏳ Skeniranje...")
         sl = st.empty()
         
-        # PROSLEDJIVANJE PDF ZASTAVICE
         df, hi, pdf, err_imgs = asyncio.run(proces_skeniranja(lista_adresa, sl, generisi_pdf))
         
         st.session_state.df_sve, st.session_state.df_history, st.session_state.pdf_fajlovi, st.session_state.error_screenshots, st.session_state.last_run = df, hi, pdf, err_imgs, time.time()
@@ -1011,7 +994,6 @@ if st.session_state.pokrenuto:
         st.markdown("---")
         st.subheader("⚖️ Uporedni Prikaz (Restorani na obe platforme)")
         
-        # NOVI FILTERI ZA UPOREDNI PRIKAZ
         c_up1, c_up2 = st.columns(2)
         with c_up1: filter_wolt_up = st.multiselect("🚦 Prikaz za Wolt:", ["Otvoreno", "Zatvoreno"], default=["Otvoreno", "Zatvoreno"], key="fw")
         with c_up2: filter_glovo_up = st.multiselect("🚦 Prikaz za Glovo:", ["Otvoreno", "Zatvoreno"], default=["Otvoreno", "Zatvoreno"], key="fg")
@@ -1033,7 +1015,6 @@ if st.session_state.pokrenuto:
         
         if uporedni_podaci:
             df_uporedni = pd.DataFrame(uporedni_podaci)
-            # PRIMENA FILTERA NA UPOREDNI PRIKAZ
             df_uporedni = df_uporedni[(df_uporedni['Status Wolt'].isin(filter_wolt_up)) & (df_uporedni['Status Glovo'].isin(filter_glovo_up))]
             
             if not df_uporedni.empty:
