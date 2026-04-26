@@ -7,6 +7,7 @@ import re
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import random
 from io import BytesIO
 from pathlib import Path
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
@@ -14,7 +15,7 @@ import time
 import streamlit as st
 import sys
 
-# PODEŠAVANJE LOKALNOG VREMENA (Rešava problem 5 ujutru na Cloud serverima)
+# PODEŠAVANJE LOKALNOG VREMENA
 try:
     from zoneinfo import ZoneInfo
     LOCAL_TZ = ZoneInfo("Europe/Belgrade")
@@ -35,7 +36,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
-# Konfiguracija Streamlit stranice (MORA BITI NA POČETKU)
+# Konfiguracija Streamlit stranice
 st.set_page_config(page_title="Nadzor Dostave", page_icon="🍔", layout="wide")
 
 # ================= MODERNI CSS DIZAJN =================
@@ -65,16 +66,13 @@ st.markdown("""
 # ================= FIX ZA WINDOWS I PLAYWRIGHT =================
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-# ===============================================================
 
-# ================= INSTALACIJA BROWSERA NA CLOUD-u =================
 @st.cache_resource
 def install_playwright():
     import os
     os.system("playwright install chromium")
 
 install_playwright()
-# ===================================================================
 
 # ================= GLOBALNA PODEŠAVANJA =================
 EMAIL_POSILJAOCA = "webb987@gmail.com"
@@ -84,25 +82,17 @@ OUTPUT_DIR = Path.cwd() / "izvestaji"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_FILE = OUTPUT_DIR / "istorija_dostave.csv"
 
-# NOVA FASCIKLA ZA SLIKE GREŠAKA
 ERRORS_DIR = Path.cwd() / "greske"
 ERRORS_DIR.mkdir(parents=True, exist_ok=True)
 
-# FAJLOVI ZA VIP PROPUSNICE
 GLOVO_AUTH_FILE = "glovo_auth.json"
 WOLT_AUTH_FILE = "wolt_auth.json"
-# ========================================================
 
-def timestamp():
-    return lokalno_vreme().strftime("%Y%m%d_%H%M%S")
-
-def format_time_short():
-    return lokalno_vreme().strftime("%H:%M")
-
+def timestamp(): return lokalno_vreme().strftime("%Y%m%d_%H%M%S")
+def format_time_short(): return lokalno_vreme().strftime("%H:%M")
 def log_msg(msg, placeholder=None):
     print(msg)
-    if placeholder:
-        placeholder.text(msg)
+    if placeholder: placeholder.text(msg)
 
 # ---------------- LJUDSKI LIVE BROJAČ (UI) ----------------
 def osvezi_live_ui(ph, wolt_count, glovo_count, adresa):
@@ -121,22 +111,16 @@ def osvezi_live_ui(ph, wolt_count, glovo_count, adresa):
     """
     ph.markdown(html, unsafe_allow_html=True)
 
-# ---------------- PODRŠKA ZA ĆIRILICU I SPECIJALNA SLOVA ----------------
+# ---------------- PODRŠKA ZA ĆIRILICU I EMAIL ----------------
 def cirilica_u_latinicu(tekst):
     if not tekst: return ""
-    mapa = {
-        'а':'a', 'б':'b', 'в':'v', 'г':'g', 'д':'d', 'ђ':'dj', 'е':'e', 'ж':'z', 'з':'z', 'и':'i', 'ј':'j', 'к':'k', 'л':'l', 'љ':'lj', 'м':'m', 'н':'n', 'њ':'nj', 'о':'o', 'п':'p', 'р':'r', 'с':'s', 'т':'t', 'ћ':'c', 'у':'u', 'ф':'f', 'х':'h', 'ц':'c', 'ч':'c', 'џ':'dz', 'ш':'s',
-        'А':'A', 'Б':'B', 'В':'V', 'Г':'G', 'Д':'D', 'Ђ':'Dj', 'Е':'E', 'Ж':'Z', 'З':'Z', 'И':'I', 'Ј':'J', 'К':'K', 'Л':'L', 'Љ':'Lj', 'М':'M', 'Н':'N', 'Њ':'Nj', 'О':'O', 'П':'P', 'Р':'R', 'С':'S', 'Т':'T', 'Ћ':'C', 'У':'U', 'Ф':'F', 'Х':'H', 'Ц':'C', 'Ч':'C', 'Џ':'Dz', 'Ш':'S'
-    }
-    for k, v in mapa.items():
-        tekst = tekst.replace(k, v)
+    mapa = { 'а':'a', 'б':'b', 'в':'v', 'г':'g', 'д':'d', 'ђ':'dj', 'е':'e', 'ж':'z', 'з':'z', 'и':'i', 'ј':'j', 'к':'k', 'л':'l', 'љ':'lj', 'м':'m', 'н':'n', 'њ':'nj', 'о':'o', 'п':'p', 'р':'r', 'с':'s', 'т':'t', 'ћ':'c', 'у':'u', 'ф':'f', 'х':'h', 'ц':'c', 'ч':'c', 'џ':'dz', 'ш':'s', 'А':'A', 'Б':'B', 'В':'V', 'Г':'G', 'Д':'D', 'Ђ':'Dj', 'Е':'E', 'Ж':'Z', 'З':'Z', 'И':'I', 'Ј':'J', 'К':'K', 'Л':'L', 'Љ':'Lj', 'М':'M', 'Н':'N', 'Њ':'Nj', 'О':'O', 'П':'P', 'Р':'R', 'С':'S', 'Т':'T', 'Ћ':'C', 'У':'U', 'Ф':'F', 'Х':'H', 'Ц':'C', 'Ч':'C', 'Џ':'Dz', 'Ш':'S' }
+    for k, v in mapa.items(): tekst = tekst.replace(k, v)
     return tekst
 
-# ---------------- EMAIL FUNKCIJA ----------------
 def posalji_email(pdf_putanje, primaoci_str, log_ph=None):
     lista_primaoca = [e.strip() for e in primaoci_str.split(",") if e.strip()]
-    if not lista_primaoca: 
-        return
+    if not lista_primaoca: return
     try:
         log_msg(f"[SISTEM] Šaljem email na: {', '.join(lista_primaoca)}...", log_ph)
         for primalac in lista_primaoca:
@@ -144,9 +128,8 @@ def posalji_email(pdf_putanje, primaoci_str, log_ph=None):
             msg['From'] = EMAIL_POSILJAOCA
             msg['To'] = primalac
             msg['Subject'] = f"Izveštaji o dostavi - {lokalno_vreme().strftime('%d.%m. u %H:%M')}"
-            body = "Pozdrav šefe,\n\nU prilogu se nalaze zbirni i pojedinačni izveštaji o statusu restorana na platformama Wolt i Glovo.\n\nSistem je uspešno završio ciklus."
+            body = "Pozdrav šefe,\n\nU prilogu se nalaze zbirni i pojedinačni izveštaji o statusu restorana.\n\nSistem je uspešno završio ciklus."
             msg.attach(MIMEText(body, 'plain'))
-
             for pdf_putanja in pdf_putanje:
                 with open(pdf_putanja, "rb") as attachment:
                     part = MIMEBase('application', 'octet-stream')
@@ -154,16 +137,13 @@ def posalji_email(pdf_putanje, primaoci_str, log_ph=None):
                     encoders.encode_base64(part)
                     part.add_header('Content-Disposition', f"attachment; filename= {os.path.basename(pdf_putanja)}")
                     msg.attach(part)
-
             server = smtplib.SMTP('smtp.gmail.com', 587)
             server.starttls()
             server.login(EMAIL_POSILJAOCA, LOZINKA_POSILJAOCA)
-            text = msg.as_string()
-            server.sendmail(EMAIL_POSILJAOCA, primalac, text)
+            server.sendmail(EMAIL_POSILJAOCA, primalac, msg.as_string())
             server.quit()
-        log_msg("[USPEH] Svi emailovi su uspešno poslati!", log_ph)
-    except Exception as e:
-        log_msg(f"[GREŠKA] Slanje emaila nije uspelo: {e}", log_ph)
+        log_msg("[USPEH] Svi emailovi su poslati!", log_ph)
+    except Exception as e: log_msg(f"[GREŠKA] Email nije uspeo: {e}", log_ph)
 
 # ---------------- ISTORIJA I GRAFICI ----------------
 def sacuvaj_u_istoriju(df):
@@ -174,23 +154,14 @@ def sacuvaj_u_istoriju(df):
     for adr in adrese:
         for plat in ["Wolt", "Glovo"]:
             sub = df[(df["Adresa"] == adr) & (df["Platforma"] == plat)]
-            otvoreno = len(sub[sub["Status"] == "Otvoreno"])
-            zatvoreno = len(sub[sub["Status"] == "Zatvoreno"])
-            istorija_podaci.append({
-                "Datum": datum_sada, "Vreme": vreme_sada, 
-                "Adresa": adr, "Platforma": plat, 
-                "Otvoreno": otvoreno, "Zatvoreno": zatvoreno
-            })
+            istorija_podaci.append({ "Datum": datum_sada, "Vreme": vreme_sada, "Adresa": adr, "Platforma": plat, "Otvoreno": len(sub[sub["Status"] == "Otvoreno"]), "Zatvoreno": len(sub[sub["Status"] == "Zatvoreno"]) })
     df_novo = pd.DataFrame(istorija_podaci)
     fajl_str = str(HISTORY_FILE)
     if os.path.exists(fajl_str):
-        df_staro = pd.read_csv(fajl_str)
-        df_kombinovano = pd.concat([df_staro, df_novo], ignore_index=True)
-    else:
-        df_kombinovano = df_novo
+        df_kombinovano = pd.concat([pd.read_csv(fajl_str), df_novo], ignore_index=True)
+    else: df_kombinovano = df_novo
     try: df_kombinovano.to_csv(fajl_str, index=False)
     except: pass
-    
     st.session_state.df_history = df_kombinovano
     return df_kombinovano
 
@@ -204,57 +175,33 @@ def kreiraj_timeline_grafikon(df_hist, adresa=None, custom_naslov=None, is_pdf=F
             if 'Datum' in df_sub.columns and 'Vreme' in df_sub.columns:
                 df_sub = df_sub.groupby(["Datum", "Vreme", "Platforma"]).sum(numeric_only=True).reset_index()
         naslov = 'Zbirni Istorijat aktivnosti (Sve Adrese)'
-        
-    if custom_naslov:
-        naslov = custom_naslov
-        
+    if custom_naslov: naslov = custom_naslov
     fig, ax = plt.subplots(figsize=(10, 4), facecolor='#ffffff')
     ax.set_facecolor('#f8f9fa')
-    
     if len(df_sub) == 0:
-        ax.text(0.5, 0.5, "Nema istorijskih podataka za ovaj period", ha='center', va='center')
+        ax.text(0.5, 0.5, "Nema istorijskih podataka", ha='center', va='center')
         ax.axis('off')
     else:
         jedan_dan = df_sub["Datum"].nunique() <= 1 if 'Datum' in df_sub.columns else True
-        if jedan_dan and 'Vreme' in df_sub.columns:
-            df_sub["X_Label"] = df_sub["Vreme"]
-        elif 'Datum' in df_sub.columns and 'Vreme' in df_sub.columns:
-            df_sub["X_Label"] = df_sub["Datum"].str[-5:].str.replace('-', '.') + " \n" + df_sub["Vreme"]
-        else:
-            df_sub["X_Label"] = "Nepoznato"
-
-        prikazi_wolt = "Wolt" in df_sub["Platforma"].values
-        prikazi_glovo = "Glovo" in df_sub["Platforma"].values
+        if jedan_dan and 'Vreme' in df_sub.columns: df_sub["X_Label"] = df_sub["Vreme"]
+        elif 'Datum' in df_sub.columns and 'Vreme' in df_sub.columns: df_sub["X_Label"] = df_sub["Datum"].str[-5:].str.replace('-', '.') + " \n" + df_sub["Vreme"]
+        else: df_sub["X_Label"] = "Nepoznato"
         wolt_data = df_sub[df_sub["Platforma"] == "Wolt"]
         glovo_data = df_sub[df_sub["Platforma"] == "Glovo"]
-
-        if is_pdf:
-            wolt_data = wolt_data.tail(48)
-            glovo_data = glovo_data.tail(48)
-
-        if prikazi_wolt and not wolt_data.empty:
-            ax.plot(wolt_data["X_Label"], wolt_data["Otvoreno"], marker='o', markersize=4, linestyle='-', color='#00c2e8', linewidth=2.5, label='Wolt Otvoreni')
-        if prikazi_glovo and not glovo_data.empty:
-            ax.plot(glovo_data["X_Label"], glovo_data["Otvoreno"], marker='s', markersize=4, linestyle='-', color='#ffc244', linewidth=2.5, label='Glovo Otvoreni')
-            
+        if is_pdf: wolt_data, glovo_data = wolt_data.tail(48), glovo_data.tail(48)
+        if not wolt_data.empty: ax.plot(wolt_data["X_Label"], wolt_data["Otvoreno"], marker='o', markersize=4, linestyle='-', color='#00c2e8', linewidth=2.5, label='Wolt Otvoreni')
+        if not glovo_data.empty: ax.plot(glovo_data["X_Label"], glovo_data["Otvoreno"], marker='s', markersize=4, linestyle='-', color='#ffc244', linewidth=2.5, label='Glovo Otvoreni')
         ax.set_ylabel('Broj otvorenih restorana', fontsize=11, fontweight='bold')
         ax.set_title(naslov, fontsize=14, fontweight='bold', color='#2c3e50', pad=15)
         ax.legend(frameon=True, fontsize=10, loc='lower center', bbox_to_anchor=(0.5, -0.3), ncol=2) 
         ax.grid(True, linestyle='--', alpha=0.6)
-        
-        n_ticks = len(wolt_data) if prikazi_wolt else (len(glovo_data) if prikazi_glovo else 0)
+        n_ticks = len(wolt_data) if not wolt_data.empty else (len(glovo_data) if not glovo_data.empty else 0)
         step = max(1, n_ticks // 15) 
         for index, label in enumerate(ax.xaxis.get_ticklabels()):
-            if index % step != 0: 
-                label.set_visible(False)
-        plt.xticks(rotation=45 if not jedan_dan else 0, fontsize=9)
-        plt.yticks(fontsize=10)
-        
+            if index % step != 0: label.set_visible(False)
+        plt.xticks(rotation=45 if not jedan_dan else 0, fontsize=9); plt.yticks(fontsize=10)
     plt.tight_layout()
-    imgdata = BytesIO()
-    fig.savefig(imgdata, format='png', bbox_inches='tight', dpi=150)
-    imgdata.seek(0)
-    plt.close(fig)
+    imgdata = BytesIO(); fig.savefig(imgdata, format='png', bbox_inches='tight', dpi=150); imgdata.seek(0); plt.close(fig)
     return imgdata
 
 def kreiraj_grafikon_status(df_sub, naslov):
@@ -262,23 +209,18 @@ def kreiraj_grafikon_status(df_sub, naslov):
     wolt_z = len(df_sub[(df_sub["Platforma"] == "Wolt") & (df_sub["Status"] == "Zatvoreno")])
     glovo_o = len(df_sub[(df_sub["Platforma"] == "Glovo") & (df_sub["Status"] == "Otvoreno")])
     glovo_z = len(df_sub[(df_sub["Platforma"] == "Glovo") & (df_sub["Status"] == "Zatvoreno")])
-    wolt_u = wolt_o + wolt_z
-    glovo_u = glovo_o + glovo_z
     fig, ax = plt.subplots(figsize=(5, 4), facecolor='#ffffff')
-    labels = ['Ukupno', 'Otvoreno', 'Zatvoreno']
-    x = np.arange(len(labels))
-    width = 0.35
-    ax.bar(x - width/2, [wolt_u, wolt_o, wolt_z], width, color='#00c2e8', label='Wolt')
-    ax.bar(x + width/2, [glovo_u, glovo_o, glovo_z], width, color='#ffc244', label='Glovo')
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontweight='bold', fontsize=10)
+    labels, x, width = ['Ukupno', 'Otvoreno', 'Zatvoreno'], np.arange(3), 0.35
+    ax.bar(x - width/2, [wolt_o+wolt_z, wolt_o, wolt_z], width, color='#00c2e8', label='Wolt')
+    ax.bar(x + width/2, [glovo_o+glovo_z, glovo_o, glovo_z], width, color='#ffc244', label='Glovo')
+    ax.set_xticks(x); ax.set_xticklabels(labels, fontweight='bold', fontsize=10)
     ax.set_title(naslov, fontsize=12, fontweight='bold', color='#2c3e50')
     ax.legend(frameon=False, fontsize=9)
-    for i, v in enumerate([wolt_u, wolt_o, wolt_z]):
+    for i, v in enumerate([wolt_o+wolt_z, wolt_o, wolt_z]):
         if v > 0: ax.text(i - width/2, v + 0.5, str(v), ha='center', va='bottom', fontweight='bold', color='#2c3e50', fontsize=9)
-    for i, v in enumerate([glovo_u, glovo_o, glovo_z]):
+    for i, v in enumerate([glovo_o+glovo_z, glovo_o, glovo_z]):
         if v > 0: ax.text(i + width/2, v + 0.5, str(v), ha='center', va='bottom', fontweight='bold', color='#2c3e50', fontsize=9)
-    max_v = max([wolt_u, glovo_u]) if max([wolt_u, glovo_u]) > 0 else 10
+    max_v = max([wolt_o+wolt_z, glovo_o+glovo_z]) if max([wolt_o+wolt_z, glovo_o+glovo_z]) > 0 else 10
     ax.set_ylim(0, max_v * 1.2)
     plt.tight_layout()
     imgdata = BytesIO(); fig.savefig(imgdata, format='png', bbox_inches='tight', dpi=150); imgdata.seek(0); plt.close(fig)
@@ -357,140 +299,79 @@ def kreiraj_grafikon_popusta(df_sub, izabrane_akcije, naslov):
     imgdata = BytesIO(); fig.savefig(imgdata, format='png', bbox_inches='tight', dpi=150); imgdata.seek(0); plt.close(fig)
     return imgdata
 
-# ---------------- ANALIZA I FORMATIRANJE ----------------
+# ---------------- EKSTRAKCIJA PODATAKA ----------------
 def ukloni_kvacice(tekst):
     if not tekst: return ""
-    mapa = {'č':'c', 'ć':'c', 'ž':'z', 'š':'s', 'đ':'dj', 'Č':'C', 'Ć':'C', 'Ž':'Z', 'Š':'S', 'Đ':'Dj'}
-    for k, v in mapa.items(): tekst = tekst.replace(k, v)
+    for k, v in {'č':'c', 'ć':'c', 'ž':'z', 'š':'s', 'đ':'dj', 'Č':'C', 'Ć':'C', 'Ž':'Z', 'Š':'S', 'Đ':'Dj'}.items(): tekst = tekst.replace(k, v)
     return tekst
 
 def izvuci_ime(tekst):
     if not tekst: return ""
-    lines = tekst.split('\n')
-    for line in lines:
+    for line in str(tekst).split('\n'):
         line = line.strip()
-        if not line or '%' in line: continue
-        line_lower = line.lower()
-        if "min" in line_lower and re.search(r'\d+', line_lower): continue
-        if "rsd" in line_lower or "din" in line_lower: continue
-        if any(x in line_lower for x in ["promo", "novo", "odlično", "besplatna dostava", "artikli", "narudžb", "narudzb", "popust", "off", "discount"]): continue
+        if not line or '%' in line or ("min" in line.lower() and re.search(r'\d+', line.lower())): continue
+        if any(x in line.lower() for x in ["rsd", "din", "promo", "novo", "odlično", "besplatna dostava", "artikli", "narudžb", "popust", "off", "discount"]): continue
         if len(line) >= 2: return line
     return ""
 
 def analiziraj_status(text):
     t = text.lower()
-    
-    if any(x in t for x in ["uskoro se zatvara", "closing soon", "zatvara se za", "closes in"]):
-        return "Otvoreno"
-        
-    ind = [
-        "samo preuzimanje", "samo za preuzimanje", "pickup only", 
-        "dostava nije dostupna", "dostava trenutno nije", "samo licno preuzimanje",
-        "zatvoreno", "zakažite", "zakaži", "zakazi", "nedostupno", "otvara se", "otvara", "closed", "schedule"
-    ]
-    if any(k in t for k in ind): return "Zatvoreno"
+    if any(x in t for x in ["uskoro se zatvara", "closing soon", "zatvara se za", "closes in"]): return "Otvoreno"
+    if any(k in t for k in ["samo preuzimanje", "samo za preuzimanje", "pickup only", "dostava nije dostupna", "dostava trenutno nije", "samo licno preuzimanje", "zatvoreno", "zakažite", "zakaži", "zakazi", "nedostupno", "otvara se", "otvara", "closed", "schedule"]): return "Zatvoreno"
     return "Otvoreno"
 
 def izvuci_ocenu(tekst, plat):
     try:
-        if not tekst: return "-"
-        cist_tekst = re.sub(r'<[^>]+>', ' ', tekst).lower()
-        ocena = None
+        cist_tekst = re.sub(r'<[^>]+>', ' ', str(tekst)).lower()
         if plat == "Glovo":
-            procenti = re.findall(r'(\d{1,3})\s*%', cist_tekst)
-            for p in procenti:
-                if int(p) >= 60:
-                    ocena = p + "%"
-                    break
+            for p in re.findall(r'(\d{1,3})\s*%', cist_tekst):
+                if int(p) >= 60: return p + "%"
         elif plat == "Wolt":
-            match = re.search(r'\b([5-9][.,][0-9]|10[.,]0)\b', cist_tekst)
-            if match: 
-                ocena = match.group(1).replace(',', '.')
-        if ocena: return ocena
-        return "-"
-    except: return "-"
+            m = re.search(r'\b([5-9][.,][0-9]|10[.,]0)\b', cist_tekst)
+            if m: return m.group(1).replace(',', '.')
+    except: pass
+    return "-"
 
 def izvuci_vreme_dostave(tekst):
     try:
-        if not tekst: return "-", np.nan
-        cist_tekst = re.sub(r'<[^>]+>', ' ', tekst).lower()
-        match = re.search(r'(\d{1,3})\s*[-–]\s*(\d{1,3})\s*(?:min|m|\')', cist_tekst)
-        if match:
-            v1, v2 = int(match.group(1)), int(match.group(2))
-            if v1 < 120 and v2 < 120:
-                return f"{v1}-{v2} min", (v1 + v2) / 2.0
-        match_single = re.search(r'\b(\d{1,3})\s*(?:min|m|\')', cist_tekst)
-        if match_single:
-            v = int(match_single.group(1))
-            if v < 120:
-                return f"{v} min", float(v)
-        return "-", np.nan
-    except: return "-", np.nan
+        cist = re.sub(r'<[^>]+>', ' ', str(tekst)).lower()
+        m1 = re.search(r'(\d{1,3})\s*[-–]\s*(\d{1,3})\s*(?:min|m|\')', cist)
+        if m1 and int(m1.group(1)) < 120 and int(m1.group(2)) < 120: return f"{m1.group(1)}-{m1.group(2)} min", (int(m1.group(1)) + int(m1.group(2))) / 2.0
+        m2 = re.search(r'\b(\d{1,3})\s*(?:min|m|\')', cist)
+        if m2 and int(m2.group(1)) < 120: return f"{m2.group(1)} min", float(m2.group(1))
+    except: pass
+    return "-", np.nan
 
 def izvuci_akciju(tekst, html, plat):
-    if not tekst and not html: return "-"
+    cist = str(tekst) + " \n " + re.sub(r'<[^>]+>', ' \n ', str(html))
+    akcije, seen, res = [], set(), []
+    for line in [l.strip().lower() for l in cist.split('\n') if l.strip()]:
+        if len(line) > 80: continue 
+        if any(x in line for x in ["besplatna dostava", "free delivery", "dostava 0", "delivery 0"]): akcije.append("Besplatna dostava")
+        elif "1+1" in line or "buy 1 get 1" in line: akcije.append("1+1 Gratis")
+        elif "%" in line and re.search(r'\d', line):
+            if plat == "Glovo" and re.fullmatch(r'\d{1,3}\s*%', line): continue
+            akcije.append(line)
+        elif any(x in line for x in ["rsd", "din"]) and any(x in line for x in ["-", "off", "discount", "popust", "save", "spend"]): akcije.append(line)
     
-    cist_html = re.sub(r'<[^>]+>', ' \n ', str(html))
-    sve_zajedno = str(tekst) + " \n " + cist_html
-    lines = [line.strip() for line in sve_zajedno.split('\n') if line.strip()]
-    
-    akcije = []
-    for line in lines:
-        t_low = line.lower()
-        if len(t_low) > 80: continue 
-        
-        if any(x in t_low for x in ["besplatna dostava", "free delivery", "dostava 0", "delivery 0", "0 rsd delivery"]):
-            akcije.append("Besplatna dostava")
-        elif "1+1" in t_low or "1 + 1" in t_low or "buy 1 get 1" in t_low:
-            akcije.append("1+1 Gratis")
-        elif "%" in t_low and re.search(r'\d', t_low):
-            if plat == "Glovo" and re.fullmatch(r'\d{1,3}\s*%', t_low):
-                continue
-            if any(x in t_low for x in ["-", "off", "discount", "popust", "ušted", "usted"]) or t_low.startswith("-"):
-                akcije.append(line)
-        elif any(x in t_low for x in ["rsd", "din"]):
-            if any(x in t_low for x in ["-", "off", "discount", "popust", "save", "spend", "potroš", "preko"]):
-                akcije.append(line)
-
-    if not akcije:
-        t_low_sve = re.sub(r'<[^>]+>', ' ', str(tekst) + " " + str(html)).lower()
-        procenti = re.findall(r'(-\s*\d{1,2}\s*%|\b\d{1,2}\s*%\s*popust|\b\d{1,2}\s*%\s*off|\b\d{1,2}\s*%\s*discount)', t_low_sve)
-        iznosi = re.findall(r'(-\d{3,4}\s*(?:rsd|din)|\b\d{3,4}\s*(?:rsd|din)\s*off|spend\s*\d{3,4}\s*(?:rsd|din))', t_low_sve)
-        akcije.extend([p.strip() for p in procenti])
-        akcije.extend([i.strip() for i in iznosi])
-
     sve_low = (str(tekst) + " " + str(html)).lower()
-    if "wolt+" in sve_low and not any("wolt+" in a.lower() for a in akcije):
-        akcije.append("Wolt+")
-    if "prime" in sve_low and not any("prime" in a.lower() for a in akcije):
-        akcije.append("Prime")
+    if not akcije:
+        akcije.extend([p.strip() for p in re.findall(r'(-\s*\d{1,2}\s*%|\b\d{1,2}\s*%\s*popust|\b\d{1,2}\s*%\s*off|\b\d{1,2}\s*%\s*discount)', sve_low)])
+    if "wolt+" in sve_low: akcije.append("Wolt+")
+    if "prime" in sve_low: akcije.append("Prime")
         
-    if akcije:
-        seen = set()
-        res = []
-        for a in akcije:
-            a_clean = re.sub(r'<[^>]+>', '', a).strip()
-            if not a_clean: continue
-            
-            if "besplatna" in a_clean.lower() or "free" in a_clean.lower():
-                a_clean = "Besplatna dostava"
-            elif a_clean not in ["Wolt+", "Prime"]:
-                a_clean = a_clean[0].upper() + a_clean[1:]
-                a_clean = a_clean.replace("rsd", "RSD").replace("din", "DIN").replace("off", "Off").replace("discount", "Discount")
+    for a in akcije:
+        ac = re.sub(r'<[^>]+>', '', a).strip()
+        if not ac: continue
+        if "besplatna" in ac.lower() or "free" in ac.lower(): ac = "Besplatna dostava"
+        elif ac not in ["Wolt+", "Prime"]: ac = ac[0].upper() + ac[1:].replace("rsd", "RSD").replace("din", "DIN")
+        if ac not in seen: seen.add(ac); res.append(f"• {ac}")
+    return "\n".join(res) if res else "-"
 
-            if a_clean not in seen:
-                seen.add(a_clean)
-                res.append(f"• {a_clean}")
-                
-        if res:
-            return "\n".join(res)
-            
-    return "-"
-
-def normalizuj_ime(ime): return re.sub(r'[^\w]', '', ime.lower())
+def normalizuj_ime(ime): return re.sub(r'[^\w]', '', str(ime).lower())
 
 
-# ---------------- LJUDSKO SKROLOVANJE (Kopirano iz videa - Ostavljeno bez mrežnih blokada) ----------------
+# ---------------- ORIGINALNO LJUDSKO SKROLOVANJE (Ne diramo logiku!) ----------------
 async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, live_ph=None, live_state=None):
     results_dict = {}
     prethodni_broj = 0
@@ -637,7 +518,6 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
                 
         rez = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", address, log_ph, live_ph, live_state)
         
-        # 🚨 PROVERA GREŠKE: Slikaj ako je našao sumnjivo malo restorana
         if len(rez) < 5:
             if error_screenshots is not None:
                 err_path = str(ERRORS_DIR / f"Wolt_Upozorenje_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
@@ -752,7 +632,6 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
         page.set_default_timeout(60000) 
         rez = await pametno_skrolovanje_i_ekstrakcija(page, "Glovo", address, log_ph, live_ph, live_state)
         
-        # 🚨 PROVERA GREŠKE: Slikaj ako je našao sumnjivo malo restorana
         if len(rez) < 5:
             if error_screenshots is not None:
                 err_path = str(ERRORS_DIR / f"Glovo_Upozorenje_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
@@ -817,7 +696,6 @@ async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=Fa
                 
             log_msg(f"\n[SISTEM] Pokrećem skeniranje za: {adr}", log_ph)
             
-            # SEKVENCIJALNO: Prvo ide GLOVO, pa tek onda WOLT
             log_msg("📱 Skrolujem GLOVO...", log_ph)
             context_glovo = await browser.new_context(**ga)
             r_glovo = await scrape_glovo(context_glovo, adr, log_ph, live_ph, live_state, error_screenshots)
@@ -883,16 +761,15 @@ with st.sidebar:
     if generisi_pdf:
         email_unos = st.text_input("📧 Pošalji izveštaj na email (opciono):", placeholder="tvoj@email.com")
     
-    timer_ph = st.empty()
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("▶️ Pokreni", type="primary", use_container_width=True): 
+        if st.button("▶️ POKRENI", type="primary", use_container_width=True): 
             st.session_state.pokrenuto = True
             st.session_state.loaded_history = False
             st.session_state.last_run = 0
             st.rerun()
     with c2:
-        if st.button("⏹️ Zaustavi", use_container_width=True): 
+        if st.button("⏹️ ZAUSTAVI", use_container_width=True): 
             st.session_state.pokrenuto = False
             st.rerun()
             
@@ -901,7 +778,7 @@ with st.sidebar:
         st.session_state.df_history = pd.DataFrame(); st.rerun()
 
     st.markdown("---")
-    st.header("📂 Stari izveštaji")
+    st.header("📂 Arhiva skeniranja")
     istorija_fajlovi = sorted(list(OUTPUT_DIR.glob("Detaljno_*.csv")), reverse=True)
     
     opcije = {"--- Izaberi ---": None}
@@ -952,7 +829,6 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
 
         now = time.time()
         if now - st.session_state.last_run >= sleep_interval * 60 or st.session_state.last_run == 0:
-            timer_ph.warning("⏳ Skeniranje u toku...")
             sl = st.empty()
             live_ui_ph = st.empty()
             live_state = {"Wolt": 0, "Glovo": 0}
@@ -978,8 +854,9 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
         else:
             st.success(f"✅ Osveženo u: {datetime.datetime.fromtimestamp(st.session_state.last_run, LOCAL_TZ).strftime('%H:%M:%S')}")
         
-        tab_dash, tab_akcije, tab_uporedno, tab_lista, tab_istorija = st.tabs([
-            "📊 Dashboard", "🎁 Akcije i Popusti", "⚖️ Uporedni Prikaz", "🔍 Lista Restorana", "📅 Istorijat"
+        # POREĐENJE TIPOVA U TABOVIMA
+        tab_dash, tab_lista, tab_uporedno, tab_akcije = st.tabs([
+            "📊 Dashboard", "🔍 Lista Restorana", "⚖️ Uporedni Prikaz", "🎁 Akcije i Popusti"
         ])
 
         adrese_un = list(df["Adresa"].unique())
@@ -1003,47 +880,32 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
             with ca: st.image(kreiraj_grafikon_status(c_df, "Uporedni Status"), use_container_width=True)
             with cb: st.image(kreiraj_grafikon_vreme_dostave(c_df, "Prosečno vreme dostave"), use_container_width=True)
 
-        with tab_akcije:
-            unikatne_akcije = set()
-            for akcija_str in c_df['Akcija']:
-                if pd.notna(akcija_str) and str(akcija_str) != "-":
-                    for a in str(akcija_str).split('\n'):
-                        cl = a.replace("• ", "").strip()
-                        if cl: unikatne_akcije.add(cl)
-            unikatne_akcije = sorted(list(unikatne_akcije))
-            izabrani_popusti = st.multiselect("Odaberi akcije za prikaz na grafikonu:", unikatne_akcije, default=unikatne_akcije)
-            st.image(kreiraj_grafikon_popusta(c_df, izabrani_popusti, "Broj restorana sa izabranim akcijama"), use_container_width=False)
-
-        with tab_uporedno:
-            c_up1, c_up2 = st.columns(2)
-            with c_up1: filter_wolt_up = st.multiselect("🚦 Prikaz za Wolt:", ["Otvoreno", "Zatvoreno"], default=["Otvoreno", "Zatvoreno"], key="fw")
-            with c_up2: filter_glovo_up = st.multiselect("🚦 Prikaz za Glovo:", ["Otvoreno", "Zatvoreno"], default=["Otvoreno", "Zatvoreno"], key="fg")
-
-            df['Naziv_Norm'] = df['Naziv'].apply(normalizuj_ime)
-            uporedni_podaci = []
-            for adr in df['Adresa'].unique():
-                df_adr = df[df['Adresa'] == adr]
-                wolt_df = df_adr[df_adr['Platforma'] == 'Wolt']
-                glovo_df = df_adr[df_adr['Platforma'] == 'Glovo']
-                zajednicki = set(wolt_df['Naziv_Norm']).intersection(set(glovo_df['Naziv_Norm']))
-                for norm_ime in zajednicki:
-                    w_row = wolt_df[wolt_df['Naziv_Norm'] == norm_ime].iloc[0]
-                    g_row = glovo_df[glovo_df['Naziv_Norm'] == norm_ime].iloc[0]
-                    uporedni_podaci.append({
-                        "Adresa": adr, "Naziv (Wolt)": w_row['Naziv'], "Status Wolt": w_row['Status'], "Vreme Wolt": w_row['Vreme dostave'], "Ocena Wolt": w_row['Ocena'], "Link Wolt": w_row['Link'],
-                        "Naziv (Glovo)": g_row['Naziv'], "Status Glovo": g_row['Status'], "Vreme Glovo": g_row['Vreme dostave'], "Ocena Glovo": g_row['Ocena'], "Link Glovo": g_row['Link']
-                    })
-            
-            if uporedni_podaci:
-                df_uporedni = pd.DataFrame(uporedni_podaci)
-                df_uporedni = df_uporedni[(df_uporedni['Status Wolt'].isin(filter_wolt_up)) & (df_uporedni['Status Glovo'].isin(filter_glovo_up))]
-                
-                if not df_uporedni.empty:
-                    st.dataframe(df_uporedni.style.map(lambda val: f'color: {"#27ae60" if val=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status Wolt', 'Status Glovo']), use_container_width=True, hide_index=True, column_config={"Link Wolt": st.column_config.LinkColumn("Link Wolt", display_text="Otvori Wolt"), "Link Glovo": st.column_config.LinkColumn("Link Glovo", display_text="Otvori Glovo")})
+            st.markdown("---")
+            st.markdown("##### 📅 Istorijat Aktivnosti (Filter Vremena)")
+            hist_df = st.session_state.df_history.copy()
+            if not hist_df.empty:
+                c_h = hist_df if graf_adr == "Sve adrese" else hist_df[hist_df["Adresa"] == graf_adr]
+                if not c_h.empty and 'Datum' in c_h.columns and 'Vreme' in c_h.columns:
+                    c_h['Datetime'] = pd.to_datetime(c_h['Datum'] + ' ' + c_h['Vreme'])
+                    min_d = c_h['Datetime'].min().date()
+                    max_d = c_h['Datetime'].max().date()
+                    
+                    c_dt1, c_dt2, c_dt3, c_dt4 = st.columns(4)
+                    with c_dt1: start_date = st.date_input("Od datuma:", min_d, min_value=min_d, max_value=max_d)
+                    with c_dt2: start_time = st.time_input("Od vremena:", datetime.time(0, 0))
+                    with c_dt3: end_date = st.date_input("Do datuma:", max_d, min_value=min_d, max_value=max_d)
+                    with c_dt4: end_time = st.time_input("Do vremena:", datetime.time(23, 59))
+                    
+                    start_dt = pd.to_datetime(datetime.datetime.combine(start_date, start_time))
+                    end_dt = pd.to_datetime(datetime.datetime.combine(end_date, end_time))
+                    
+                    mask = (c_h['Datetime'] >= start_dt) & (c_h['Datetime'] <= end_dt)
+                    chart_hist = c_h.loc[mask].copy()
+                    st.image(kreiraj_timeline_grafikon(chart_hist, None, "Istorijat aktivnosti"), use_container_width=True)
                 else:
-                    st.info("Nema restorana koji odgovaraju odabranim filterima statusa.")
+                    st.info("Nema istorije za odabranu adresu.")
             else:
-                st.info("Nema restorana koji se nalaze na obe platforme za odabrane adrese.")
+                st.info("Nema istorijskih podataka.")
 
         with tab_lista:
             f1, f2, f3 = st.columns(3)
@@ -1081,38 +943,54 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
 
             st.dataframe(
                 disp_df.style.apply(style_rows, axis=1), 
-                use_container_width=True, hide_index=True,
+                use_container_width=True, hide_index=True, height=800,
                 column_config={
                     "Link": st.column_config.LinkColumn("Link", display_text="Otvori na sajtu"),
                     "Akcija": st.column_config.TextColumn("Akcija", width="large")
                 }
             )
 
-        with tab_istorija:
-            hist_df = st.session_state.df_history.copy()
-            if not hist_df.empty:
-                c_h = hist_df if graf_adr == "Sve adrese" else hist_df[hist_df["Adresa"] == graf_adr]
-                if not c_h.empty and 'Datum' in c_h.columns and 'Vreme' in c_h.columns:
-                    c_h['Datetime'] = pd.to_datetime(c_h['Datum'] + ' ' + c_h['Vreme'])
-                    min_d = c_h['Datetime'].min().date()
-                    max_d = c_h['Datetime'].max().date()
-                    
-                    c_dt1, c_dt2, c_dt3, c_dt4 = st.columns(4)
-                    with c_dt1: start_date = st.date_input("Od datuma:", min_d, min_value=min_d, max_value=max_d)
-                    with c_dt2: start_time = st.time_input("Od vremena:", datetime.time(0, 0))
-                    with c_dt3: end_date = st.date_input("Do datuma:", max_d, min_value=min_d, max_value=max_d)
-                    with c_dt4: end_time = st.time_input("Do vremena:", datetime.time(23, 59))
-                    
-                    start_dt = pd.to_datetime(datetime.datetime.combine(start_date, start_time))
-                    end_dt = pd.to_datetime(datetime.datetime.combine(end_date, end_time))
-                    
-                    mask = (c_h['Datetime'] >= start_dt) & (c_h['Datetime'] <= end_dt)
-                    chart_hist = c_h.loc[mask].copy()
-                    st.image(kreiraj_timeline_grafikon(chart_hist, None, "Istorijat aktivnosti"), use_container_width=True)
+        with tab_uporedno:
+            c_up1, c_up2 = st.columns(2)
+            with c_up1: filter_wolt_up = st.multiselect("🚦 Prikaz za Wolt:", ["Otvoreno", "Zatvoreno"], default=["Otvoreno", "Zatvoreno"], key="fw")
+            with c_up2: filter_glovo_up = st.multiselect("🚦 Prikaz za Glovo:", ["Otvoreno", "Zatvoreno"], default=["Otvoreno", "Zatvoreno"], key="fg")
+
+            df['Naziv_Norm'] = df['Naziv'].apply(normalizuj_ime)
+            uporedni_podaci = []
+            for adr in adrese_un:
+                df_adr = df[df['Adresa'] == adr]
+                wolt_df = df_adr[df_adr['Platforma'] == 'Wolt']
+                glovo_df = df_adr[df_adr['Platforma'] == 'Glovo']
+                zajednicki = set(wolt_df['Naziv_Norm']).intersection(set(glovo_df['Naziv_Norm']))
+                for norm_ime in zajednicki:
+                    w_row = wolt_df[wolt_df['Naziv_Norm'] == norm_ime].iloc[0]
+                    g_row = glovo_df[glovo_df['Naziv_Norm'] == norm_ime].iloc[0]
+                    uporedni_podaci.append({
+                        "Adresa": adr, "Naziv (Wolt)": w_row['Naziv'], "Status Wolt": w_row['Status'], "Vreme Wolt": w_row['Vreme dostave'], "Ocena Wolt": w_row['Ocena'], "Link Wolt": w_row['Link'],
+                        "Naziv (Glovo)": g_row['Naziv'], "Status Glovo": g_row['Status'], "Vreme Glovo": g_row['Vreme dostave'], "Ocena Glovo": g_row['Ocena'], "Link Glovo": g_row['Link']
+                    })
+            
+            if uporedni_podaci:
+                df_uporedni = pd.DataFrame(uporedni_podaci)
+                df_uporedni = df_uporedni[(df_uporedni['Status Wolt'].isin(filter_wolt_up)) & (df_uporedni['Status Glovo'].isin(filter_glovo_up))]
+                
+                if not df_uporedni.empty:
+                    st.dataframe(df_uporedni.style.map(lambda val: f'color: {"#27ae60" if val=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status Wolt', 'Status Glovo']), use_container_width=True, hide_index=True, height=800, column_config={"Link Wolt": st.column_config.LinkColumn("Link Wolt", display_text="Otvori Wolt"), "Link Glovo": st.column_config.LinkColumn("Link Glovo", display_text="Otvori Glovo")})
                 else:
-                    st.info("Nema istorije za odabranu adresu.")
+                    st.info("Nema restorana koji odgovaraju odabranim filterima statusa.")
             else:
-                st.info("Nema istorijskih podataka.")
+                st.info("Nema restorana koji se nalaze na obe platforme za odabrane adrese.")
+
+        with tab_akcije:
+            unikatne_akcije = set()
+            for akcija_str in c_df['Akcija']:
+                if pd.notna(akcija_str) and str(akcija_str) != "-":
+                    for a in str(akcija_str).split('\n'):
+                        cl = a.replace("• ", "").strip()
+                        if cl: unikatne_akcije.add(cl)
+            unikatne_akcije = sorted(list(unikatne_akcije))
+            izabrani_popusti = st.multiselect("Odaberi akcije za prikaz na grafikonu:", unikatne_akcije, default=unikatne_akcije)
+            st.image(kreiraj_grafikon_popusta(c_df, izabrani_popusti, "Broj restorana sa izabranim akcijama"), use_container_width=False)
 
         if st.session_state.get('pdf_fajlovi'):
             st.markdown("---"); st.subheader("📥 PDF Izveštaji")
