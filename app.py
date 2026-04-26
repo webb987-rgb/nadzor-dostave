@@ -1,4 +1,4 @@
-Evo skripte"import asyncio
+import asyncio
 
 import datetime
 
