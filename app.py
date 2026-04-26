@@ -103,7 +103,7 @@ def posalji_email(pdf_putanje, primaoci_str, log_ph=None):
             msg['From'] = EMAIL_POSILJAOCA
             msg['To'] = primalac
             msg['Subject'] = f"Izveštaji o dostavi - {lokalno_vreme().strftime('%d.%m. u %H:%M')}"
-            body = "Pozdrav šefe,\n\nU prilogu se nalaze zbirni i pojedinačni izveštaji o statusu restorana na platformama Wolt i Glovo.\n\nSistem je uspješno završio ciklus."
+            body = "Pozdrav šefe,\n\nU prilogu se nalaze zbirni i pojedinačni izveštaji o statusu restorana na platformama Wolt i Glovo.\n\nSistem je uspešno završio ciklus."
             msg.attach(MIMEText(body, 'plain'))
 
             for pdf_putanja in pdf_putanje:
@@ -120,9 +120,9 @@ def posalji_email(pdf_putanje, primaoci_str, log_ph=None):
             text = msg.as_string()
             server.sendmail(EMAIL_POSILJAOCA, primalac, text)
             server.quit()
-        log_msg("[USPEH] Svi emailovi su uspješno poslati!", log_ph)
+        log_msg("[USPEH] Svi emailovi su uspešno poslati!", log_ph)
     except Exception as e:
-        log_msg(f"[GREŠKA] Slanje emaila nije uspjelo: {e}", log_ph)
+        log_msg(f"[GREŠKA] Slanje emaila nije uspelo: {e}", log_ph)
 
 # ---------------- ISTORIJA I GRAFICI ----------------
 def sacuvaj_u_istoriju(df):
@@ -442,30 +442,20 @@ def izvuci_akciju(tekst, html, plat):
 
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', ime.lower())
 
-# ---------------- LJUDSKO SKROLOVANJE SA RADAROM (NETWORK INTERCEPTION) ----------------
+# ---------------- SPARTAN MOD V2: LAŽNI PIKSEL ----------------
+TINY_PNG = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
+
+async def pametni_dijetalni_mod(route):
+    if route.request.resource_type in ["image", "media"]:
+        await route.fulfill(status=200, content_type="image/png", body=TINY_PNG)
+    else:
+        await route.continue_()
+
+# ---------------- LJUDSKO SKROLOVANJE (Kopirano iz videa) ----------------
 async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, prog_bar=None):
     results_dict = {}
     prethodni_broj = 0
     pokusaji_na_dnu = 0
-    
-    # === RADAR SISTEM (Prati šta Glovo skida u pozadini) ===
-    radar = {"aktivno": False, "poslednji_ulov": time.time()}
-
-    async def na_zahtev(request):
-        # Ako Glovo zatraži novih 50 restorana, radar se pali
-        if "offset=" in request.url and "limit=" in request.url:
-            radar["aktivno"] = True
-
-    async def na_odgovor(response):
-        # Kad podaci stignu (200 OK), radar beleži vreme
-        if "offset=" in response.url and "limit=" in response.url and response.status == 200:
-            radar["aktivno"] = False
-            radar["poslednji_ulov"] = time.time()
-
-    if plat == "Glovo":
-        page.on("request", na_zahtev)
-        page.on("response", na_odgovor)
-    # ========================================================
     
     while True:
         if plat == "Wolt":
@@ -527,30 +517,17 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, pr
             prethodni_broj = trenutni
             pokusaji_na_dnu = 0
             
-        await page.evaluate("window.scrollBy(0, window.innerHeight);")
-        await asyncio.sleep(0.8)
+        # LJUDSKI SKROL: Spuštamo se konstantno po 500 piksela na svakih pola sekunde
+        await page.evaluate("window.scrollBy(0, 500);")
+        await asyncio.sleep(0.5)
         
         h = await page.evaluate("document.body.scrollHeight")
         s = await page.evaluate("window.scrollY + window.innerHeight")
         
-        if s >= h - 100:
+        if s >= h - 50:
             pokusaji_na_dnu += 1
-            
-            if plat == "Glovo":
-                # AKO JE RADAR AKTIVAN (Glovo skida podatke), resetujemo tajmer i čekamo!
-                if radar["aktivno"]:
-                    pokusaji_na_dnu = 0
-                    await asyncio.sleep(2)
-                    continue
-                # Ako je upravo skinuo (pre manje od 3 sekunde), damo mu vremena da nacrta
-                elif time.time() - radar["poslednji_ulov"] < 3.0:
-                    pokusaji_na_dnu = 0
-                    await asyncio.sleep(1.5)
-                    continue
-
             await asyncio.sleep(1.5)
             
-            # Kraj samo ako smo na dnu, i radar se potpuno ućutao
             if pokusaji_na_dnu >= 5: 
                 break 
         
@@ -784,12 +761,14 @@ async def proces_skeniranja(adrese, log_ph, prog_bar, generisi_pdf=False, email_
             # SEKVENCIJALNO: Prvo ide GLOVO, pa tek onda WOLT
             log_msg("📱 Skrolujem GLOVO...", log_ph)
             context_glovo = await browser.new_context(**glovo_args)
+            await context_glovo.route("**/*", pametni_dijetalni_mod)
             r_glovo = await scrape_glovo(context_glovo, adr, log_ph, error_screenshots, prog_bar)
             sve.extend(r_glovo)
             await context_glovo.close() 
             
             log_msg("🚲 Skrolujem WOLT...", log_ph)
             context_wolt = await browser.new_context(**wolt_args)
+            await context_wolt.route("**/*", pametni_dijetalni_mod)
             r_wolt = await scrape_wolt(context_wolt, adr, log_ph, error_screenshots, prog_bar)
             sve.extend(r_wolt)
             await context_wolt.close() 
@@ -1090,6 +1069,7 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
                 with ec[idx % len(ec)]:
                     st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
 
+    # OSVJEŽAVANJE RADI SAMO KADA JE POKRENUT (Ne kad gledamo istoriju)
     if st.session_state.pokrenuto:
         if auto_refresh:
             rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
