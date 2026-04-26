@@ -485,11 +485,17 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, li
         
     return list(results_dict.values())
 
-# ---------------- SCRAPERS (ZALEĐENO IZ SVETOG GRALA) ----------------
+# ---------------- SCRAPERS SA VIDEO SNIMANJEM ----------------
 async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None):
     page = None
     try:
         page = await context_wolt.new_page()
+        
+        # PODEŠAVANJE VIDEO SNIMANJA (Čuva snimak kad se page ugasi)
+        try:
+            v_path = await page.video.path()
+            if v_path: error_screenshots.append(v_path)
+        except: pass
         
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page.set_default_timeout(10000)
@@ -513,7 +519,7 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
             except PlaywrightTimeoutError: pass
             
         except PlaywrightTimeoutError:
-            log_msg(f"[WOLT] VIP mod (Ulogovan). Menjam adresu u header-u za: {address}", log_ph)
+            log_msg(f"[WOLT] VIP mod. Menjam adresu u header-u za: {address}", log_ph)
             try:
                 header_btn = page.locator("[data-test-id='header.address-select-button']")
                 if not await header_btn.is_visible():
@@ -704,7 +710,9 @@ async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=Fa
         
         wa = {
             "permissions": ['geolocation'],
-            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "record_video_dir": str(ERRORS_DIR),
+            "record_video_size": {"width": 1280, "height": 720}
         }
         if os.path.exists(WOLT_AUTH_FILE):
             log_msg("🔐 WOLT: Učitana VIP propusnica.", log_ph)
@@ -828,9 +836,7 @@ with st.sidebar:
     with col_obrisi:
         if st.button("🗑️ Obriši", type="secondary", use_container_width=True) and opcije[izabrani_fajl]:
             os.remove(opcije[izabrani_fajl])
-            if st.session_state.loaded_history: 
-                st.session_state.df_sve = pd.DataFrame()
-                st.session_state.loaded_history = False
+            if st.session_state.loaded_history: st.session_state.df_sve = pd.DataFrame(); st.session_state.loaded_history = False
             st.rerun()
 
     st.markdown("---")
@@ -860,7 +866,7 @@ with st.sidebar:
             else:
                 st.error("❌ Netačna lozinka!")
 
-# ================= GLAVNI INTERFEJS =================
+# ================= GLAVNI INTERFEJS (TABS & LOADING) =================
 if st.session_state.pokrenuto or st.session_state.loaded_history:
 
     if st.session_state.pokrenuto:
@@ -881,9 +887,10 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
                 if not df.empty:
                     df.to_csv(OUTPUT_DIR / f"Detaljno_{timestamp()}.csv", index=False)
 
-            live_ui_ph.empty()
-            st.session_state.df_sve, st.session_state.df_history, st.session_state.pdf_fajlovi, st.session_state.error_screenshots, st.session_state.last_run = df, hi, pdf, err_imgs, time.time()
-            sl.empty(); st.rerun()
+                live_ui_ph.empty()
+                st.session_state.df_sve, st.session_state.df_history, st.session_state.pdf_fajlovi, st.session_state.error_screenshots, st.session_state.last_run = df, hi, pdf, err_imgs, time.time()
+                sl.empty()
+            st.rerun()
 
     df = st.session_state.df_sve
     if not df.empty:
@@ -1038,12 +1045,15 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
                 with pc[i % 4]:
                     with open(p, "rb") as f: st.download_button(f"Preuzmi {os.path.basename(p)}", f.read(), os.path.basename(p), "application/pdf")
                     
+        # PRIKAZ Videa / Slika ZA WOLT DEBUGGING
         if st.session_state.get('error_screenshots'):
             st.markdown("---")
-            st.error("⚠️ PAŽNJA: Skripta je zabeležila potencijalne probleme pri skeniranju. Proveri slike ispod:")
-            ec = st.columns(len(st.session_state.error_screenshots))
-            for idx, img_path in enumerate(st.session_state.error_screenshots):
-                with ec[idx % len(ec)]: st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
+            st.error("⚠️ PAŽNJA: Skripta je zabeležila potencijalne probleme pri skeniranju. Proveri snimke ispod:")
+            for media_path in st.session_state.error_screenshots:
+                if media_path.endswith('.webm'):
+                    st.video(media_path)
+                else:
+                    st.image(media_path, caption=os.path.basename(media_path), use_container_width=True)
 
     if st.session_state.pokrenuto:
         if auto_refresh:
