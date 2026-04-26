@@ -687,7 +687,7 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
     finally:
         if page: await page.close()
 
-# ---------------- SEKVENCIJALNI PROCES SKENIRANJA (HIBRIDNI MOD) ----------------
+# ---------------- SEKVENCIJALNI PROCES SKENIRANJA (BEZ MREŽNIH BLOKADA) ----------------
 async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=False, email_primaoca=""):
     sve = []
     error_screenshots = [] 
@@ -730,15 +730,12 @@ async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=Fa
                 
             log_msg(f"\n[SISTEM] Pokrećem skeniranje za: {adr}", log_ph)
             
-            # SEKVENCIJALNO 1: GLOVO SA "LAŽNIM PIKSELOM" (Brzo i ne troši RAM)
             log_msg("📱 Skrolujem GLOVO...", log_ph)
             context_glovo = await browser.new_context(**ga)
-            await context_glovo.route("**/*", pametni_dijetalni_mod)
             r_glovo = await scrape_glovo(context_glovo, adr, log_ph, live_ph, live_state, error_screenshots)
             sve.extend(r_glovo)
             await context_glovo.close() 
             
-            # SEKVENCIJALNO 2: WOLT SA PRAVIM SLIKAMA (Mora zbog njegovih senzora)
             log_msg("🚲 Skrolujem WOLT...", log_ph)
             context_wolt = await browser.new_context(**wa)
             r_wolt = await scrape_wolt(context_wolt, adr, log_ph, live_ph, live_state, error_screenshots)
@@ -866,7 +863,7 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
             live_ui_ph = st.empty()
             live_state = {"Wolt": 0, "Glovo": 0}
             
-            with st.spinner('🔄 Pretražujem restorane, molim te sačekaj...'):
+            with st.spinner('🔄 Pretražujem restorane, sačekaj...'):
                 df, hi, pdf, err_imgs = asyncio.run(proces_skeniranja(lista_adresa, sl, live_ui_ph, live_state, generisi_pdf, email_unos))
                 
                 if not df.empty:
@@ -1051,8 +1048,9 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
     if st.session_state.pokrenuto:
         if auto_refresh:
             rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
+            countdown_ph = st.sidebar.empty()
             while rem > 0:
-                st.sidebar.info(f"⏳ Sledeće automatsko skeniranje za: **{rem//60:02d}:{rem%60:02d}**")
+                countdown_ph.info(f"⏳ Sledeće automatsko skeniranje za: **{rem//60:02d}:{rem%60:02d}**")
                 time.sleep(1)
                 rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
             st.rerun()
