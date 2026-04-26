@@ -7,8 +7,8 @@ import re
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import plotly.express as px          # NOVO: Moderni interaktivni grafikoni
-import plotly.graph_objects as go    # NOVO: Moderni interaktivni grafikoni
+import plotly.express as px          
+import plotly.graph_objects as go    
 import random
 from io import BytesIO
 from pathlib import Path
@@ -41,10 +41,10 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 # Konfiguracija Streamlit stranice
 st.set_page_config(page_title="Nadzor Dostave", page_icon="🍔", layout="wide")
 
-# ================= MODERNI CSS DIZAJN (SaaS STIL) =================
+# ================= MODERNI CSS DIZAJN =================
 st.markdown("""
 <style>
-    /* Stil za Live Brojace u meniju */
+    /* Stil za Live Brojace */
     .live-card {
         display: flex; gap: 20px; background: #f8f9fa; padding: 15px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);
     }
@@ -57,7 +57,7 @@ st.markdown("""
     .metric-value { font-size: 32px; font-weight: bold; margin: 0; }
     .metric-title { font-size: 14px; color: #666; margin: 0; text-transform: uppercase; letter-spacing: 1px;}
     
-    /* Moderni Dashboard KPI blokovi (Zamena za stare tabele) */
+    /* Moderni Dashboard KPI blokovi */
     .kpi-wrapper { display: flex; gap: 15px; margin-bottom: 20px; flex-wrap: wrap; }
     .kpi-card { 
         flex: 1; background: #ffffff; padding: 20px; border-radius: 12px; 
@@ -76,7 +76,7 @@ st.markdown("""
     .stTabs [aria-selected="true"] { background-color: #e0e5ec !important; font-weight: bold; border-bottom: 3px solid #ff4b4b;}
 </style>
 """, unsafe_allow_html=True)
-# ==================================================================
+# ======================================================
 
 # ================= FIX ZA WINDOWS I PLAYWRIGHT =================
 if sys.platform == "win32":
@@ -267,16 +267,20 @@ def kreiraj_timeline_grafikon_ui(df_hist, adresa=None, custom_naslov=None, metri
         
     if len(df_sub) == 0: return go.Figure().update_layout(title="Nema istorijskih podataka", plot_bgcolor="rgba(0,0,0,0)")
 
-    df_sub["Datetime_Str"] = df_sub["Datum"].str[-5:].str.replace('-', '.') + " " + df_sub["Vreme"]
+    # REŠENJE ZA CIK-CAK GRAFIKON (Prava hronologija vremena)
+    df_sub["Pravi_Datetime"] = pd.to_datetime(df_sub["Datum"] + " " + df_sub["Vreme"])
+    df_sub = df_sub.sort_values(by="Pravi_Datetime")
     
-    fig = px.line(df_sub, x="Datetime_Str", y=metrika, color="Platforma", markers=True,
+    fig = px.line(df_sub, x="Pravi_Datetime", y=metrika, color="Platforma", markers=True,
                   color_discrete_map={"Wolt": "#00c2e8", "Glovo": "#ffc244"}, title=naslov)
     fig.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", 
                       xaxis_title="", yaxis_title=ylabel, hovermode="x unified", title_font_size=18)
+    # Podesavamo format vremena na dnu (X osa)
+    fig.update_xaxes(tickformat="%d.%m. u %H:%M") 
     fig.update_traces(line=dict(width=3), marker=dict(size=8))
     return fig
 
-# ================= GRAFICI ZA PDF (Matplotlib - Zadržano kako ne bi pucalo) =================
+# ================= GRAFICI ZA PDF =================
 def kreiraj_timeline_grafikon_pdf(df_hist, adresa=None, custom_naslov=None):
     df_sub = df_hist.copy()
     if adresa:
@@ -292,6 +296,9 @@ def kreiraj_timeline_grafikon_pdf(df_hist, adresa=None, custom_naslov=None):
     ax.set_facecolor('#f8f9fa')
     if len(df_sub) == 0: ax.axis('off')
     else:
+        # Fiks za sortiranje i na Matplotlibu
+        df_sub = df_sub.sort_values(by=["Datum", "Vreme"])
+        
         jedan_dan = df_sub["Datum"].nunique() <= 1 if 'Datum' in df_sub.columns else True
         if jedan_dan and 'Vreme' in df_sub.columns: df_sub["X_Label"] = df_sub["Vreme"]
         elif 'Datum' in df_sub.columns and 'Vreme' in df_sub.columns: df_sub["X_Label"] = df_sub["Datum"].str[-5:].str.replace('-', '.') + " \n" + df_sub["Vreme"]
@@ -478,10 +485,12 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
     page = None
     try:
         page = await context_wolt.new_page()
+        
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page.set_default_timeout(10000)
         
         await page.goto("https://wolt.com/sr/srb")
+        
         try: await page.locator("[data-test-id='allow-button']").click(timeout=3000)
         except: pass
         
@@ -497,28 +506,38 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
             await page.goto("https://wolt.com/sr/discovery/restaurants")
             try: await page.wait_for_selector("a[data-test-id^='venueCard.']", timeout=8000)
             except PlaywrightTimeoutError: pass
+            
         except PlaywrightTimeoutError:
             log_msg(f"[WOLT] VIP mod. Menjam adresu u header-u za: {address}", log_ph)
             try:
                 header_btn = page.locator("[data-test-id='header.address-select-button']")
-                if not await header_btn.is_visible(): header_btn = page.locator("header [role='button']").first
+                if not await header_btn.is_visible():
+                    header_btn = page.locator("header [role='button']").first
+                    
                 await header_btn.wait_for(state="visible", timeout=5000)
                 await header_btn.click()
                 await asyncio.sleep(1)
+
                 search_modal = page.locator("[data-test-id='address-picker-input']")
-                if not await search_modal.is_visible(): search_modal = page.get_by_role("combobox").last
+                if not await search_modal.is_visible():
+                    search_modal = page.get_by_role("combobox").last
+                    
                 await search_modal.wait_for(state="visible", timeout=5000)
                 await search_modal.click()
                 await search_modal.fill(address)
+
                 await asyncio.sleep(2)
                 await page.keyboard.press("ArrowDown")
                 await page.keyboard.press("Enter")
                 await asyncio.sleep(5)
+                
                 await page.goto("https://wolt.com/sr/discovery/restaurants")
                 try: await page.wait_for_selector("a[data-test-id^='venueCard.']", timeout=8000)
                 except PlaywrightTimeoutError: pass
+                
             except PlaywrightTimeoutError:
-                if error_screenshots is not None:
+                log_msg(f"[WOLT ODUSTAJEM] Ne mogu da nadjem polje za promenu adrese.", log_ph)
+                if page and error_screenshots is not None:
                     try:
                         err_path = str(ERRORS_DIR / f"Wolt_Timeout_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
                         await page.screenshot(path=err_path)
@@ -527,17 +546,24 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
                 return []
                 
         rez = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", address, log_ph, live_ph, live_state)
-        if len(rez) < 5 and error_screenshots is not None:
-            err_path = str(ERRORS_DIR / f"Wolt_Upozorenje_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
-            try: await page.screenshot(path=err_path); error_screenshots.append(err_path)
-            except: pass
+        
+        if len(rez) < 5:
+            if error_screenshots is not None:
+                err_path = str(ERRORS_DIR / f"Wolt_Upozorenje_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
+                try:
+                    await page.screenshot(path=err_path)
+                    error_screenshots.append(err_path)
+                except: pass
+
         return rez
+
     except Exception as e: 
         log_msg(f"[WOLT GREŠKA] {e}", log_ph)
         if page and error_screenshots is not None:
             try:
                 err_path = str(ERRORS_DIR / f"Wolt_Error_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
-                await page.screenshot(path=err_path); error_screenshots.append(err_path)
+                await page.screenshot(path=err_path)
+                error_screenshots.append(err_path)
             except: pass
         return []
     finally:
@@ -547,17 +573,20 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
     page = None
     try:
         page = await context_glovo.new_page()
+        
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page.set_default_timeout(10000)
         
         await page.goto("https://glovoapp.com/sr/rs", wait_until="domcontentloaded")
+        
         stranica_tekst = await page.content()
         if "Oh, no!" in stranica_tekst or "It looks like there's a problem" in stranica_tekst:
             log_msg(f"[GLOVO BLOKADA] {address}.", log_ph)
             if error_screenshots is not None:
                 try:
                     err_path = str(ERRORS_DIR / f"Glovo_SoftBan_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
-                    await page.screenshot(path=err_path); error_screenshots.append(err_path)
+                    await page.screenshot(path=err_path)
+                    error_screenshots.append(err_path)
                 except: pass
             return []
         
@@ -568,48 +597,77 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
             hero_input = page.locator("#hero-container-input")
             await hero_input.wait_for(state="visible", timeout=4000)
             await hero_input.click()
-            await page.get_by_role("searchbox").fill(address)
-            await page.locator("div[data-actionable='true'][role='button']").first.click(timeout=8000)
+            search = page.get_by_role("searchbox")
+            await search.fill(address)
+            
+            dropdown_item = page.locator("div[data-actionable='true'][role='button']").first
+            await dropdown_item.wait_for(state="visible", timeout=8000)
+            await dropdown_item.click()
+            
         except PlaywrightTimeoutError:
+            log_msg(f"[GLOVO] Ulogovan sam, menjam adresu u header-u za: {address}", log_ph)
             try:
-                await page.locator('header div[role="button"]').first.click(timeout=5000)
+                header_btn = page.locator('header div[role="button"]').first
+                await header_btn.wait_for(state="visible", timeout=5000)
+                await header_btn.click()
+                
                 await asyncio.sleep(1)
                 search_modal = page.get_by_role("searchbox").last
                 await search_modal.wait_for(state="visible", timeout=5000)
                 await search_modal.click()
                 await search_modal.fill(address)
+                
                 await asyncio.sleep(2)
-                await page.locator("div[data-actionable='true'][role='button']").first.click(timeout=8000)
+                dropdown_item = page.locator("div[data-actionable='true'][role='button']").first
+                await dropdown_item.wait_for(state="visible", timeout=8000)
+                await dropdown_item.click()
             except PlaywrightTimeoutError:
+                log_msg(f"[GLOVO ODUSTAJEM] Ne mogu da promenim adresu za {address}. Slikam...", log_ph)
                 if error_screenshots is not None:
                     try:
                         err_path = str(ERRORS_DIR / f"Glovo_Nav_Error_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
-                        await page.screenshot(path=err_path); error_screenshots.append(err_path)
+                        await page.screenshot(path=err_path)
+                        error_screenshots.append(err_path)
                     except: pass
                 return []
 
-        try: await page.locator("button:has-text('Drugo')").click(timeout=3000)
-        except: pass
-        try: await page.locator("button:has-text('Potvrdi adresu')").click(timeout=3000)
-        except: pass
+        try:
+            btn_drugo = page.locator("button:has-text('Drugo')")
+            await btn_drugo.wait_for(state="visible", timeout=3000)
+            await btn_drugo.click()
+        except PlaywrightTimeoutError: pass
+        
+        try:
+            btn_potvrdi = page.locator("button:has-text('Potvrdi adresu')")
+            await btn_potvrdi.wait_for(state="visible", timeout=3000)
+            await btn_potvrdi.click()
+        except PlaywrightTimeoutError: pass
+        
         await asyncio.sleep(5)
         try:
             btn_pocetna = page.locator("text='Idi na početnu stranicu'")
             if await btn_pocetna.count() > 0 and await btn_pocetna.first.is_visible(timeout=3000):
-                await btn_pocetna.first.click(); await asyncio.sleep(5)
+                await btn_pocetna.first.click()
+                await asyncio.sleep(5)
         except: pass
         
-        try: await page.get_by_role("link", name=re.compile(r"Restorani|Hrana|Food|Restaurants", re.I)).first.click(timeout=5000)
-        except: pass
+        try:
+            kat_link = page.get_by_role("link", name=re.compile(r"Restorani|Hrana|Food|Restaurants", re.I)).first
+            await kat_link.wait_for(state="visible", timeout=5000)
+            await kat_link.click()
+        except PlaywrightTimeoutError: pass
         
         await asyncio.sleep(5)
         page.set_default_timeout(60000) 
         rez = await pametno_skrolovanje_i_ekstrakcija(page, "Glovo", address, log_ph, live_ph, live_state)
         
-        if len(rez) < 5 and error_screenshots is not None:
-            err_path = str(ERRORS_DIR / f"Glovo_Upozorenje_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
-            try: await page.screenshot(path=err_path); error_screenshots.append(err_path)
-            except: pass
+        if len(rez) < 5:
+            if error_screenshots is not None:
+                err_path = str(ERRORS_DIR / f"Glovo_Upozorenje_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
+                try:
+                    await page.screenshot(path=err_path)
+                    error_screenshots.append(err_path)
+                except: pass
 
         return rez
     except Exception as e: 
@@ -617,7 +675,8 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
         if page and error_screenshots is not None:
             try:
                 err_path = str(ERRORS_DIR / f"Glovo_Error_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
-                await page.screenshot(path=err_path); error_screenshots.append(err_path)
+                await page.screenshot(path=err_path)
+                error_screenshots.append(err_path)
             except: pass
         return []
     finally:
@@ -629,23 +688,53 @@ async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=Fa
     error_screenshots = [] 
     
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--no-sandbox"]) 
-        wa = {"permissions": ['geolocation'], "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-        if os.path.exists(WOLT_AUTH_FILE): wa["storage_state"] = WOLT_AUTH_FILE
-        ga = {"permissions": ['geolocation'], "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "extra_http_headers": {"Accept-Language": "en-US,en;q=0.9,sr;q=0.8"}}
-        if os.path.exists(GLOVO_AUTH_FILE): ga["storage_state"] = GLOVO_AUTH_FILE
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage", 
+                "--no-sandbox"             
+            ]
+        ) 
+        
+        wa = {
+            "permissions": ['geolocation'],
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        if os.path.exists(WOLT_AUTH_FILE):
+            log_msg("🔐 WOLT: Učitana VIP propusnica.", log_ph)
+            wa["storage_state"] = WOLT_AUTH_FILE
+            
+        ga = {
+            "permissions": ['geolocation'],
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "extra_http_headers": {"Accept-Language": "en-US,en;q=0.9,sr;q=0.8"}
+        }
+        if os.path.exists(GLOVO_AUTH_FILE):
+            log_msg("🔐 GLOVO: Učitana VIP propusnica.", log_ph)
+            ga["storage_state"] = GLOVO_AUTH_FILE
             
         for i, adr in enumerate(adrese):
-            live_state["Wolt"] = 0; live_state["Glovo"] = 0
+            live_state["Wolt"] = 0
+            live_state["Glovo"] = 0
             osvezi_live_ui(live_ph, 0, 0, adr)
-            if i > 0: await asyncio.sleep(5)
             
+            if i > 0:
+                log_msg("⏳ Pauza 5 sekundi izmedju adresa...", log_ph)
+                await asyncio.sleep(5)
+                
+            log_msg(f"\n[SISTEM] Pokrećem skeniranje za: {adr}", log_ph)
+            
+            log_msg("📱 Skrolujem GLOVO...", log_ph)
             context_glovo = await browser.new_context(**ga)
-            sve.extend(await scrape_glovo(context_glovo, adr, log_ph, live_ph, live_state, error_screenshots))
+            r_glovo = await scrape_glovo(context_glovo, adr, log_ph, live_ph, live_state, error_screenshots)
+            sve.extend(r_glovo)
             await context_glovo.close() 
             
+            log_msg("🚲 Skrolujem WOLT...", log_ph)
             context_wolt = await browser.new_context(**wa)
-            sve.extend(await scrape_wolt(context_wolt, adr, log_ph, live_ph, live_state, error_screenshots))
+            r_wolt = await scrape_wolt(context_wolt, adr, log_ph, live_ph, live_state, error_screenshots)
+            sve.extend(r_wolt)
             await context_wolt.close() 
                 
         await browser.close()
@@ -653,56 +742,28 @@ async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=Fa
     if sve:
         df_s = pd.DataFrame(sve)
         df_h = sacuvaj_u_istoriju(df_s)
+        
         pdf_fajlovi = []
         if generisi_pdf:
+            log_msg("Generišem PDF izveštaje...", log_ph)
             zbirni = napravi_zbirni_pdf(df_s, df_h)
             if zbirni: pdf_fajlovi.append(zbirni)
+            
             for adr in df_s["Adresa"].unique():
-                p_fajl = napravi_pdf_za_adresu(df_s[df_s["Adresa"] == adr], adr, df_h)
+                df_sub = df_s[df_s["Adresa"] == adr]
+                p_fajl = napravi_pdf_za_adresu(df_sub, adr, df_h)
                 if p_fajl: pdf_fajlovi.append(p_fajl)
+                
             if email_primaoca.strip() and pdf_fajlovi:
+                log_msg(f"Šaljem izveštaje na email: {email_primaoca}", log_ph)
                 posalji_email(pdf_fajlovi, email_primaoca, log_ph)
+        else:
+            log_msg("Skeniranje završeno. Opcija za PDF je isključena.", log_ph)
+            
         return df_s, df_h, pdf_fajlovi, error_screenshots
     return pd.DataFrame(), pd.DataFrame(), [], error_screenshots
 
-# ---------------- PDF GENERATOR (KORISTI MATPLOTLIB) ----------------
-def napravi_pdf_za_adresu(df_adr, adr, df_hist):
-    p_path = str(OUTPUT_DIR / f"Izvestaj_{ukloni_kvacice(adr).replace(' ', '_')}_{timestamp()}.pdf")
-    doc = SimpleDocTemplate(p_path, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
-    styles = getSampleStyleSheet()
-    ns = ParagraphStyle('Naslov', parent=styles['Title'], textColor=colors.HexColor("#2c3e50"), fontSize=20, spaceAfter=10)
-    cs = ParagraphStyle('Cell', parent=styles['Normal'], fontSize=10, leading=14)
-    elements = [Paragraph(f"Izvestaj o Dostavi - {ukloni_kvacice(adr).upper()}", ns)]
-    tab = [["Platforma", "Ukupno Nadjeno", "Otvoreno", "Zatvoreno"]]
-    for plat in ["Wolt", "Glovo"]:
-        sub = df_adr[df_adr["Platforma"] == plat]
-        if not sub.empty: tab.append([plat, len(sub), len(sub[sub["Status"] == "Otvoreno"]), len(sub[sub["Status"] == "Zatvoreno"])])
-    t_z = Table(tab, colWidths=[120, 100, 100, 100])
-    t_z.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.HexColor("#34495e")),('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),('ALIGN', (0,0), (-1,-1), 'CENTER'),('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#bdc3c7"))]))
-    elements.extend([t_z, Spacer(1, 20), Table([[Image(kreiraj_grafikon_status_pdf(df_adr, f"Status - {adr}"), width=280, height=224)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), Spacer(1, 10), Table([[Image(kreiraj_timeline_grafikon_pdf(df_hist, adr), width=500, height=200)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), PageBreak()])
-    doc.build(elements)
-    return p_path
-
-def napravi_zbirni_pdf(df, df_hist):
-    p_path = str(OUTPUT_DIR / f"Zbirni_Izvestaj_{timestamp()}.pdf")
-    doc = SimpleDocTemplate(p_path, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
-    styles = getSampleStyleSheet()
-    ns = ParagraphStyle('Naslov', parent=styles['Title'], textColor=colors.HexColor("#2c3e50"), fontSize=20, spaceAfter=20)
-    ps = ParagraphStyle('Podnaslov', parent=styles['Heading2'], textColor=colors.HexColor("#2980b9"), fontSize=16, spaceBefore=20, spaceAfter=15)
-    elements = [Paragraph("Zbirni Izvestaj - Sve Adrese", ns), Table([[Image(kreiraj_grafikon_status_pdf(df, "Ukupni Status"), width=280, height=224)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), Spacer(1, 10), Table([[Image(kreiraj_timeline_grafikon_pdf(df_hist, None), width=500, height=200)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), PageBreak()]
-    for adr in df["Adresa"].unique():
-        df_a = df[df["Adresa"] == adr]
-        elements.append(Paragraph(f"Statistika za lokaciju: {ukloni_kvacice(adr).upper()}", ps))
-        tab = [["Platforma", "Ukupno Nadjeno", "Otvoreno", "Zatvoreno"]]
-        for plat in ["Wolt", "Glovo"]:
-            sub = df_a[df_a["Platforma"] == plat]
-            if not sub.empty: tab.append([plat, len(sub), len(sub[sub["Status"] == "Otvoreno"]), len(sub[sub["Status"] == "Zatvoreno"])])
-        t_a = Table(tab, colWidths=[120, 100, 100, 100])
-        t_a.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.HexColor("#34495e")),('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),('ALIGN', (0,0), (-1,-1), 'CENTER'),('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#bdc3c7"))]))
-        elements.extend([t_a, Spacer(1, 15), Table([[Image(kreiraj_grafikon_status_pdf(df_a, f"Trenutni Status - {adr}"), width=280, height=224)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), Spacer(1, 20)])
-    doc.build(elements); return p_path
-
-# ================= STREAMLIT KONTROLE =================
+# ================= STREAMLIT UI =================
 if 'pokrenuto' not in st.session_state: st.session_state.pokrenuto = False
 if 'last_run' not in st.session_state: st.session_state.last_run = 0
 if 'df_sve' not in st.session_state: st.session_state.df_sve = pd.DataFrame()
@@ -725,7 +786,7 @@ with st.sidebar:
     sleep_interval = st.number_input("⏱️ Interval (min):", min_value=1, value=60, disabled=not auto_refresh)
     
     generisi_pdf = st.checkbox("📄 Generiši PDF izveštaje", value=False)
-    email_unos = st.text_input("📧 Pošalji izveštaj na email:", placeholder="tvoj@email.com") if generisi_pdf else ""
+    email_unos = st.text_input("📧 Pošalji na email:", placeholder="tvoj@email.com") if generisi_pdf else ""
     
     c1, c2 = st.columns(2)
     with c1:
@@ -742,36 +803,56 @@ with st.sidebar:
     st.markdown("---")
     st.header("📂 Arhiva skeniranja")
     istorija_fajlovi = sorted(list(OUTPUT_DIR.glob("Detaljno_*.csv")), reverse=True)
-    
-    opcije = {"--- Izaberi ---": None}
+    opcije = {"--- Izaberi stari izveštaj ---": None}
     for f in istorija_fajlovi:
         ime = f.stem.replace("Detaljno_", "")
         try: opcije[datetime.datetime.strptime(ime, "%Y%m%d_%H%M%S").strftime("%d.%m.%Y u %H:%M:%S")] = f
         except: opcije[ime] = f
 
-    izabrani_fajl = st.selectbox("Učitaj prethodno skeniranje:", list(opcije.keys()), label_visibility="collapsed")
-    
+    izabrani_fajl = st.selectbox("Prethodna skeniranja:", list(opcije.keys()), label_visibility="collapsed")
     col_ucitaj, col_obrisi = st.columns(2)
     with col_ucitaj:
-        if st.button("📂 Učitaj", use_container_width=True):
-            fajl = opcije[izabrani_fajl]
-            if fajl:
-                st.session_state.df_sve = pd.read_csv(fajl)
-                st.session_state.pokrenuto = False
-                st.session_state.loaded_history = True
-                st.session_state.last_run = os.path.getmtime(fajl)
-                st.rerun()
+        if st.button("📂 Učitaj", use_container_width=True) and opcije[izabrani_fajl]:
+            st.session_state.df_sve = pd.read_csv(opcije[izabrani_fajl])
+            st.session_state.pokrenuto = False
+            st.session_state.loaded_history = True
+            st.session_state.last_run = os.path.getmtime(opcije[izabrani_fajl])
+            st.rerun()
     with col_obrisi:
-        if st.button("🗑️ Obriši", type="secondary", use_container_width=True):
-            fajl_za_brisanje = opcije[izabrani_fajl]
-            if fajl_za_brisanje and os.path.exists(fajl_za_brisanje):
-                os.remove(fajl_za_brisanje)
-                if st.session_state.loaded_history and st.session_state.last_run == os.path.getmtime(fajl_za_brisanje) if os.path.exists(fajl_za_brisanje) else True:
-                    st.session_state.df_sve = pd.DataFrame()
-                    st.session_state.loaded_history = False
-                st.rerun()
+        if st.button("🗑️ Obriši", type="secondary", use_container_width=True) and opcije[izabrani_fajl]:
+            os.remove(opcije[izabrani_fajl])
+            if st.session_state.loaded_history: st.session_state.df_sve = pd.DataFrame(); st.session_state.loaded_history = False
+            st.rerun()
 
-# ================= GLAVNI INTERFEJS (TABS) =================
+    # DUGME ZA KOMPLETAN RESET SISTEMA SA LOZINKOM
+    st.markdown("---")
+    st.header("⚠️ Reset Sistema")
+    with st.expander("Opasna Zona (Brisanje svega)"):
+        st.warning("Ovo briše SVE stare izveštaje i istoriju aktivnosti!")
+        reset_pass = st.text_input("Lozinka:", type="password", key="reset_pass")
+        if st.button("🚨 OBRIŠI SVE", use_container_width=True):
+            if reset_pass == "zekapeka":
+                if os.path.exists(HISTORY_FILE): os.remove(HISTORY_FILE)
+                st.session_state.df_history = pd.DataFrame()
+                
+                for f in OUTPUT_DIR.glob("Detaljno_*.csv"):
+                    try: os.remove(f)
+                    except: pass
+                for f in OUTPUT_DIR.glob("*.pdf"):
+                    try: os.remove(f)
+                    except: pass
+                
+                st.session_state.df_sve = pd.DataFrame()
+                st.session_state.loaded_history = False
+                st.session_state.pokrenuto = False
+                
+                st.success("✅ Sistem je uspešno resetovan!")
+                time.sleep(1.5)
+                st.rerun()
+            else:
+                st.error("❌ Netačna lozinka!")
+
+# ================= GLAVNI INTERFEJS (TABS & LOADING) =================
 if st.session_state.pokrenuto or st.session_state.loaded_history:
 
     if st.session_state.pokrenuto:
@@ -779,19 +860,22 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
         if not lista_adresa: 
             st.warning("⚠️ Unesite bar prvu adresu da biste skenirali!"); st.session_state.pokrenuto = False; st.rerun()
 
-        now = time.time()
-        if now - st.session_state.last_run >= sleep_interval * 60 or st.session_state.last_run == 0:
-            sl = st.empty()
-            live_ui_ph = st.empty()
-            live_state = {"Wolt": 0, "Glovo": 0}
+        if time.time() - st.session_state.last_run >= sleep_interval * 60 or st.session_state.last_run == 0:
             
             with st.spinner('🔄 Skripta pretražuje restorane, sačekaj...'):
+                live_ui_ph = st.empty() 
+                sl = st.empty() 
+                live_state = {"Wolt": 0, "Glovo": 0}
+                
                 df, hi, pdf, err_imgs = asyncio.run(proces_skeniranja(lista_adresa, sl, live_ui_ph, live_state, generisi_pdf, email_unos))
-                if not df.empty: df.to_csv(OUTPUT_DIR / f"Detaljno_{timestamp()}.csv", index=False)
+                
+                if not df.empty:
+                    df.to_csv(OUTPUT_DIR / f"Detaljno_{timestamp()}.csv", index=False)
 
-            live_ui_ph.empty()
-            st.session_state.df_sve, st.session_state.df_history, st.session_state.pdf_fajlovi, st.session_state.error_screenshots, st.session_state.last_run = df, hi, pdf, err_imgs, time.time()
-            sl.empty(); st.rerun()
+                live_ui_ph.empty()
+                st.session_state.df_sve, st.session_state.df_history, st.session_state.pdf_fajlovi, st.session_state.error_screenshots, st.session_state.last_run = df, hi, pdf, err_imgs, time.time()
+                sl.empty()
+            st.rerun()
 
     df = st.session_state.df_sve
     if not df.empty:
@@ -801,15 +885,13 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
         if st.session_state.loaded_history: st.info("📂 **Pregledate arhivirani izveštaj.**")
         else: st.success(f"✅ Skeniranje završeno u: {datetime.datetime.fromtimestamp(st.session_state.last_run, LOCAL_TZ).strftime('%H:%M:%S')}")
         
-        # PREPOZNATLJIVI REDOSLED TABOVA
         tab_dash, tab_lista, tab_uporedno, tab_akcije = st.tabs([
             "📊 Dashboard", "🔍 Lista Restorana", "⚖️ Uporedni Prikaz", "🎁 Akcije i Popusti"
         ])
-
+        
         adrese_un = list(df["Adresa"].unique())
         
         with tab_dash:
-            # NOVE SaaS KPI KARTICE UMESTO STARIH TABELA
             for adr in adrese_un:
                 st.markdown(f"<h3 style='color: #2c3e50;'>📍 {adr.upper()}</h3>", unsafe_allow_html=True)
                 sd = df[df["Adresa"] == adr]
@@ -845,7 +927,6 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
             graf_adr = st.selectbox("📍 Filtriraj Grafikone:", ["Sve adrese"] + adrese_un, index=1 if len(adrese_un) == 1 else 0)
             c_df = df if graf_adr == "Sve adrese" else df[df["Adresa"] == graf_adr]
             
-            # NOVI MODERNI GRAFIKONI
             ca, cb = st.columns(2)
             with ca: st.plotly_chart(kreiraj_grafikon_status_ui(c_df, "Uporedni Status"), use_container_width=True)
             with cb: st.plotly_chart(kreiraj_grafikon_vreme_dostave_ui(c_df, "Prosečno vreme dostave"), use_container_width=True)
@@ -872,7 +953,6 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
                     mask = (c_h['Datetime'] >= start_dt) & (c_h['Datetime'] <= end_dt)
                     chart_hist = c_h.loc[mask].copy()
                     
-                    # MODERNI TIMELINE GRAFIKONI
                     st.plotly_chart(kreiraj_timeline_grafikon_ui(chart_hist, None, "Istorijat: Broj otvorenih restorana", metrika="Otvoreno", ylabel="Otvoreni restorani"), use_container_width=True)
                     
                     ch1, ch2 = st.columns(2)
@@ -922,15 +1002,15 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
                     w_row = df_adr[(df_adr['Platforma'] == 'Wolt') & (df_adr['Naziv_Norm'] == norm_ime)].iloc[0]
                     g_row = df_adr[(df_adr['Platforma'] == 'Glovo') & (df_adr['Naziv_Norm'] == norm_ime)].iloc[0]
                     uporedni_podaci.append({
-                        "Adresa": adr, "Naziv (Wolt)": w_row['Naziv'], "Status Wolt": w_row['Status'], "Vreme Wolt": w_row['Vreme dostave'], "Ocena Wolt": w_row['Ocena'], "Link Wolt": w_row['Link'],
-                        "Naziv (Glovo)": g_row['Naziv'], "Status Glovo": g_row['Status'], "Vreme Glovo": g_row['Vreme dostave'], "Ocena Glovo": g_row['Ocena'], "Link Glovo": g_row['Link']
+                        "Adresa": adr, "Naziv (Wolt)": w_row['Naziv'], "Status Wolt": w_row['Status'], "Vreme Wolt": w_row['Vreme dostave'], "Link Wolt": w_row['Link'], "Naziv (Glovo)": g_row['Naziv'], "Status Glovo": g_row['Status'], "Vreme Glovo": g_row['Vreme dostave'], "Link Glovo": g_row['Link']
                     })
+            
             if uporedni_podaci:
                 df_uporedni = pd.DataFrame(uporedni_podaci)
                 df_uporedni = df_uporedni[(df_uporedni['Status Wolt'].isin(filter_wolt_up)) & (df_uporedni['Status Glovo'].isin(filter_glovo_up))]
-                if not df_uporedni.empty: st.dataframe(df_uporedni.style.map(lambda val: f'color: {"#27ae60" if val=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status Wolt', 'Status Glovo']), use_container_width=True, hide_index=True, height=800, column_config={"Link Wolt": st.column_config.LinkColumn("Link Wolt", display_text="Otvori Wolt"), "Link Glovo": st.column_config.LinkColumn("Link Glovo", display_text="Otvori Glovo")})
-                else: st.info("Nema restorana koji odgovaraju odabranim filterima statusa.")
-            else: st.info("Nema restorana koji se nalaze na obe platforme za odabrane adrese.")
+                if not df_uporedni.empty: st.dataframe(df_uporedni.style.map(lambda val: f'color: {"#27ae60" if val=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status Wolt', 'Status Glovo']), use_container_width=True, hide_index=True, height=800, column_config={"Link Wolt": st.column_config.LinkColumn("Link Wolt"), "Link Glovo": st.column_config.LinkColumn("Link Glovo")})
+                else: st.info("Nema restorana za date filtere.")
+            else: st.info("Nema zajedničkih restorana na obe platforme.")
 
         with tab_akcije:
             unikatne_akcije = set()
@@ -940,8 +1020,7 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
                         cl = a.replace("• ", "").strip()
                         if cl: unikatne_akcije.add(cl)
             unikatne_akcije = sorted(list(unikatne_akcije))
-            izabrani_popusti = st.multiselect("Odaberi akcije za prikaz na grafikonu:", unikatne_akcije, default=unikatne_akcije[:5] if unikatne_akcije else [])
-            # NOVI MODERNI GRAFIKON POPUSTA
+            izabrani_popusti = st.multiselect("Odaberi akcije za prikaz na grafikonu:", unikatne_akcije, default=unikatne_akcije)
             st.plotly_chart(kreiraj_grafikon_popusta_ui(c_df, izabrani_popusti, "Broj restorana sa izabranim akcijama"), use_container_width=True)
 
         if st.session_state.get('pdf_fajlovi'):
