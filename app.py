@@ -485,18 +485,16 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, li
         
     return list(results_dict.values())
 
-# ---------------- SCRAPERS SA VIDEO SNIMANJEM ----------------
-async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None):
+# ---------------- SCRAPERS (STEALTH + FAST FAIL) SA OPCIJOM RETRY/VIDEO ----------------
+async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None, is_retry=False):
     page = None
     try:
         page = await context_wolt.new_page()
         
-        # PODEŠAVANJE VIDEO SNIMANJA (Čuva snimak kad se page ugasi)
-        try:
-            v_path = await page.video.path()
-            if v_path: error_screenshots.append(v_path)
+        video_path = None
+        try: video_path = await page.video.path()
         except: pass
-        
+
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page.set_default_timeout(10000)
         
@@ -549,41 +547,51 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
             except PlaywrightTimeoutError:
                 log_msg(f"[WOLT ODUSTAJEM] Ne mogu da nadjem polje za promenu adrese.", log_ph)
                 if page and error_screenshots is not None:
-                    try:
-                        err_path = str(ERRORS_DIR / f"Wolt_Timeout_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
-                        await page.screenshot(path=err_path)
-                        error_screenshots.append(err_path)
-                    except: pass
+                    if is_retry and video_path: error_screenshots.append(video_path)
+                    else:
+                        try:
+                            err_path = str(ERRORS_DIR / f"Wolt_Timeout_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
+                            await page.screenshot(path=err_path)
+                            error_screenshots.append(err_path)
+                        except: pass
                 return []
                 
         rez = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", address, log_ph, live_ph, live_state)
         
-        if len(rez) < 5:
+        if len(rez) == 0:
             if error_screenshots is not None:
-                err_path = str(ERRORS_DIR / f"Wolt_Upozorenje_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
-                try:
-                    await page.screenshot(path=err_path)
-                    error_screenshots.append(err_path)
-                except: pass
-
+                if is_retry and video_path:
+                    error_screenshots.append(video_path)
+                else:
+                    err_path = str(ERRORS_DIR / f"Wolt_Upozorenje_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
+                    try:
+                        await page.screenshot(path=err_path)
+                        error_screenshots.append(err_path)
+                    except: pass
         return rez
 
     except Exception as e: 
         log_msg(f"[WOLT GREŠKA] {e}", log_ph)
         if page and error_screenshots is not None:
-            try:
-                err_path = str(ERRORS_DIR / f"Wolt_Error_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
-                await page.screenshot(path=err_path)
-                error_screenshots.append(err_path)
-            except: pass
+            if is_retry and video_path: error_screenshots.append(video_path)
+            else:
+                try:
+                    err_path = str(ERRORS_DIR / f"Wolt_Error_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
+                    await page.screenshot(path=err_path)
+                    error_screenshots.append(err_path)
+                except: pass
         return []
     finally:
         if page: await page.close()
 
-async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None):
+async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None, is_retry=False):
     page = None
     try:
         page = await context_glovo.new_page()
+
+        video_path = None
+        try: video_path = await page.video.path()
+        except: pass
         
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page.set_default_timeout(10000)
@@ -594,11 +602,13 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
         if "Oh, no!" in stranica_tekst or "It looks like there's a problem" in stranica_tekst:
             log_msg(f"[GLOVO BLOKADA] {address}.", log_ph)
             if error_screenshots is not None:
-                try:
-                    err_path = str(ERRORS_DIR / f"Glovo_SoftBan_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
-                    await page.screenshot(path=err_path)
-                    error_screenshots.append(err_path)
-                except: pass
+                if is_retry and video_path: error_screenshots.append(video_path)
+                else:
+                    try:
+                        err_path = str(ERRORS_DIR / f"Glovo_SoftBan_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
+                        await page.screenshot(path=err_path)
+                        error_screenshots.append(err_path)
+                    except: pass
             return []
         
         try: await page.get_by_role("button", name=re.compile("Accept|Prihvati", re.I)).click(timeout=3000)
@@ -633,13 +643,15 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
                 await dropdown_item.wait_for(state="visible", timeout=8000)
                 await dropdown_item.click()
             except PlaywrightTimeoutError:
-                log_msg(f"[GLOVO ODUSTAJEM] Ne mogu da promenim adresu za {address}. Slikam...", log_ph)
+                log_msg(f"[GLOVO ODUSTAJEM] Ne mogu da promenim adresu za {address}.", log_ph)
                 if error_screenshots is not None:
-                    try:
-                        err_path = str(ERRORS_DIR / f"Glovo_Nav_Error_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
-                        await page.screenshot(path=err_path)
-                        error_screenshots.append(err_path)
-                    except: pass
+                    if is_retry and video_path: error_screenshots.append(video_path)
+                    else:
+                        try:
+                            err_path = str(ERRORS_DIR / f"Glovo_Nav_Error_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
+                            await page.screenshot(path=err_path)
+                            error_screenshots.append(err_path)
+                        except: pass
                 return []
 
         try:
@@ -672,28 +684,33 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
         page.set_default_timeout(60000) 
         rez = await pametno_skrolovanje_i_ekstrakcija(page, "Glovo", address, log_ph, live_ph, live_state)
         
-        if len(rez) < 5:
+        if len(rez) == 0:
             if error_screenshots is not None:
-                err_path = str(ERRORS_DIR / f"Glovo_Upozorenje_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
-                try:
-                    await page.screenshot(path=err_path)
-                    error_screenshots.append(err_path)
-                except: pass
+                if is_retry and video_path:
+                    error_screenshots.append(video_path)
+                else:
+                    err_path = str(ERRORS_DIR / f"Glovo_Upozorenje_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
+                    try:
+                        await page.screenshot(path=err_path)
+                        error_screenshots.append(err_path)
+                    except: pass
 
         return rez
     except Exception as e: 
         log_msg(f"[GLOVO GREŠKA] {e}", log_ph)
         if page and error_screenshots is not None:
-            try:
-                err_path = str(ERRORS_DIR / f"Glovo_Error_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
-                await page.screenshot(path=err_path)
-                error_screenshots.append(err_path)
-            except: pass
+            if is_retry and video_path: error_screenshots.append(video_path)
+            else:
+                try:
+                    err_path = str(ERRORS_DIR / f"Glovo_Error_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
+                    await page.screenshot(path=err_path)
+                    error_screenshots.append(err_path)
+                except: pass
         return []
     finally:
         if page: await page.close()
 
-# ---------------- SEKVENCIJALNI PROCES SKENIRANJA ----------------
+# ---------------- SEKVENCIJALNI PROCES SKENIRANJA (SA KAMEROM KAD ZABODE) ----------------
 async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=False, email_primaoca=""):
     sve = []
     error_screenshots = [] 
@@ -710,9 +727,7 @@ async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=Fa
         
         wa = {
             "permissions": ['geolocation'],
-            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "record_video_dir": str(ERRORS_DIR),
-            "record_video_size": {"width": 1280, "height": 720}
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
         if os.path.exists(WOLT_AUTH_FILE):
             log_msg("🔐 WOLT: Učitana VIP propusnica.", log_ph)
@@ -738,19 +753,45 @@ async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=Fa
                 
             log_msg(f"\n[SISTEM] Pokrećem skeniranje za: {adr}", log_ph)
             
+            # --- GLOVO PRVI POKUŠAJ ---
             log_msg("📱 Skrolujem GLOVO...", log_ph)
             context_glovo = await browser.new_context(**ga)
             await context_glovo.route("**/*", pametni_dijetalni_mod)
             r_glovo = await scrape_glovo(context_glovo, adr, log_ph, live_ph, live_state, error_screenshots)
-            sve.extend(r_glovo)
             await context_glovo.close() 
             
+            # GLOVO RETRY SA KAMEROM
+            if len(r_glovo) == 0:
+                log_msg(f"⚠️ GLOVO nije našao restorane na {adr}. Ponavljam sa uključenom kamerom...", log_ph)
+                ga_vid = ga.copy()
+                ga_vid["record_video_dir"] = str(ERRORS_DIR)
+                ga_vid["record_video_size"] = {"width": 1280, "height": 720}
+                context_glovo_vid = await browser.new_context(**ga_vid)
+                await context_glovo_vid.route("**/*", pametni_dijetalni_mod)
+                r_glovo = await scrape_glovo(context_glovo_vid, adr, log_ph, live_ph, live_state, error_screenshots, is_retry=True)
+                await context_glovo_vid.close()
+                
+            sve.extend(r_glovo)
+            
+            # --- WOLT PRVI POKUŠAJ ---
             log_msg("🚲 Skrolujem WOLT...", log_ph)
             context_wolt = await browser.new_context(**wa)
             await context_wolt.route("**/*", pametni_dijetalni_mod)
             r_wolt = await scrape_wolt(context_wolt, adr, log_ph, live_ph, live_state, error_screenshots)
-            sve.extend(r_wolt)
             await context_wolt.close() 
+            
+            # WOLT RETRY SA KAMEROM
+            if len(r_wolt) == 0:
+                log_msg(f"⚠️ WOLT nije našao restorane na {adr}. Ponavljam sa uključenom kamerom...", log_ph)
+                wa_vid = wa.copy()
+                wa_vid["record_video_dir"] = str(ERRORS_DIR)
+                wa_vid["record_video_size"] = {"width": 1280, "height": 720}
+                context_wolt_vid = await browser.new_context(**wa_vid)
+                await context_wolt_vid.route("**/*", pametni_dijetalni_mod)
+                r_wolt = await scrape_wolt(context_wolt_vid, adr, log_ph, live_ph, live_state, error_screenshots, is_retry=True)
+                await context_wolt_vid.close()
+                
+            sve.extend(r_wolt)
                 
         await browser.close()
             
@@ -866,7 +907,6 @@ with st.sidebar:
             else:
                 st.error("❌ Netačna lozinka!")
 
-# ================= GLAVNI INTERFEJS (TABS & LOADING) =================
 if st.session_state.pokrenuto or st.session_state.loaded_history:
 
     if st.session_state.pokrenuto:
@@ -887,9 +927,9 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
                 if not df.empty:
                     df.to_csv(OUTPUT_DIR / f"Detaljno_{timestamp()}.csv", index=False)
 
-                live_ui_ph.empty()
-                st.session_state.df_sve, st.session_state.df_history, st.session_state.pdf_fajlovi, st.session_state.error_screenshots, st.session_state.last_run = df, hi, pdf, err_imgs, time.time()
-                sl.empty()
+            live_ui_ph.empty()
+            st.session_state.df_sve, st.session_state.df_history, st.session_state.pdf_fajlovi, st.session_state.error_screenshots, st.session_state.last_run = df, hi, pdf, err_imgs, time.time()
+            sl.empty()
             st.rerun()
 
     df = st.session_state.df_sve
@@ -1045,10 +1085,10 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
                 with pc[i % 4]:
                     with open(p, "rb") as f: st.download_button(f"Preuzmi {os.path.basename(p)}", f.read(), os.path.basename(p), "application/pdf")
                     
-        # PRIKAZ Videa / Slika ZA WOLT DEBUGGING
+        # VIDEO I SLIKE GREŠAKA
         if st.session_state.get('error_screenshots'):
             st.markdown("---")
-            st.error("⚠️ PAŽNJA: Skripta je zabeležila potencijalne probleme pri skeniranju. Proveri snimke ispod:")
+            st.error("⚠️ PAŽNJA: Skripta nije našla restorane iz prvog pokušaja pa se vratila sa upaljenom kamerom. Pogledaj snimke/slike ispod:")
             for media_path in st.session_state.error_screenshots:
                 if media_path.endswith('.webm'):
                     st.video(media_path)
