@@ -159,7 +159,6 @@ def sacuvaj_u_istoriju(df):
             otvoreno = len(sub[sub["Status"] == "Otvoreno"])
             zatvoreno = len(sub[sub["Status"] == "Zatvoreno"])
             
-            # Dodato za istoriju vremena dostave i akcija
             avg_vreme = sub["Vreme_Broj"].dropna().mean()
             avg_vreme = 0 if pd.isna(avg_vreme) else round(avg_vreme, 1)
             
@@ -184,10 +183,7 @@ def sacuvaj_u_istoriju(df):
 
 def kreiraj_timeline_grafikon(df_hist, adresa=None, custom_naslov=None, is_pdf=False, metrika="Otvoreno", ylabel="Broj otvorenih restorana"):
     df_sub = df_hist.copy()
-    
-    # Ako očitavamo staru CSV istoriju koja nije imala ove kolone, stavi ih na nulu da ne puca
-    if metrika not in df_sub.columns:
-        df_sub[metrika] = 0
+    if metrika not in df_sub.columns: df_sub[metrika] = 0
 
     if adresa:
         df_sub = df_sub[df_sub["Adresa"] == adresa]
@@ -400,7 +396,16 @@ def izvuci_akciju(tekst, html, plat):
 
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', str(ime).lower())
 
-# ---------------- ORIGINALNO LJUDSKO SKROLOVANJE (Ne diramo logiku!) ----------------
+# ---------------- SPARTAN MOD V2: LAŽNI PIKSEL ----------------
+TINY_PNG = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
+
+async def pametni_dijetalni_mod(route):
+    if route.request.resource_type in ["image", "media"]:
+        await route.fulfill(status=200, content_type="image/png", body=TINY_PNG)
+    else:
+        await route.continue_()
+
+# ---------------- ORIGINALNO LJUDSKO SKROLOVANJE (Zaleđena logika) ----------------
 async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, live_ph=None, live_state=None):
     results_dict = {}
     prethodni_broj = 0
@@ -682,7 +687,7 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
     finally:
         if page: await page.close()
 
-# ---------------- PROCES SKENIRANJA ----------------
+# ---------------- SEKVENCIJALNI PROCES SKENIRANJA (HIBRIDNI MOD) ----------------
 async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=False, email_primaoca=""):
     sve = []
     error_screenshots = [] 
@@ -725,12 +730,15 @@ async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=Fa
                 
             log_msg(f"\n[SISTEM] Pokrećem skeniranje za: {adr}", log_ph)
             
+            # SEKVENCIJALNO 1: GLOVO SA "LAŽNIM PIKSELOM" (Brzo i ne troši RAM)
             log_msg("📱 Skrolujem GLOVO...", log_ph)
             context_glovo = await browser.new_context(**ga)
+            await context_glovo.route("**/*", pametni_dijetalni_mod)
             r_glovo = await scrape_glovo(context_glovo, adr, log_ph, live_ph, live_state, error_screenshots)
             sve.extend(r_glovo)
             await context_glovo.close() 
             
+            # SEKVENCIJALNO 2: WOLT SA PRAVIM SLIKAMA (Mora zbog njegovih senzora)
             log_msg("🚲 Skrolujem WOLT...", log_ph)
             context_wolt = await browser.new_context(**wa)
             r_wolt = await scrape_wolt(context_wolt, adr, log_ph, live_ph, live_state, error_screenshots)
@@ -801,10 +809,6 @@ with st.sidebar:
         if st.button("⏹️ ZAUSTAVI", use_container_width=True): 
             st.session_state.pokrenuto = False
             st.rerun()
-            
-    if st.button("🗑️ Obriši istoriju", use_container_width=True):
-        if os.path.exists(HISTORY_FILE): os.remove(HISTORY_FILE)
-        st.session_state.df_history = pd.DataFrame(); st.rerun()
 
     st.markdown("---")
     st.header("📂 Arhiva skeniranja")
@@ -862,7 +866,7 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
             live_ui_ph = st.empty()
             live_state = {"Wolt": 0, "Glovo": 0}
             
-            with st.spinner('🔄 Pretražujem restorane, sačekaj...'):
+            with st.spinner('🔄 Pretražujem restorane, molim te sačekaj...'):
                 df, hi, pdf, err_imgs = asyncio.run(proces_skeniranja(lista_adresa, sl, live_ui_ph, live_state, generisi_pdf, email_unos))
                 
                 if not df.empty:
@@ -883,7 +887,6 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
         else:
             st.success(f"✅ Osveženo u: {datetime.datetime.fromtimestamp(st.session_state.last_run, LOCAL_TZ).strftime('%H:%M:%S')}")
         
-        # POREĐENJE TIPOVA U TABOVIMA: Dashboard -> Lista -> Uporedni -> Akcije
         tab_dash, tab_lista, tab_uporedno, tab_akcije = st.tabs([
             "📊 Dashboard", "🔍 Lista Restorana", "⚖️ Uporedni Prikaz", "🎁 Akcije i Popusti"
         ])
@@ -909,7 +912,6 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
             with ca: st.image(kreiraj_grafikon_status(c_df, "Uporedni Status"), use_container_width=True)
             with cb: st.image(kreiraj_grafikon_vreme_dostave(c_df, "Prosečno vreme dostave"), use_container_width=True)
 
-            # ISTORIJAT JE SADA NA DNU DASHBOARDA
             st.markdown("---")
             st.markdown("##### 📅 Istorijat Aktivnosti (Filter Vremena)")
             hist_df = st.session_state.df_history.copy()
@@ -933,10 +935,8 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
                     mask = (c_h['Datetime'] >= start_dt) & (c_h['Datetime'] <= end_dt)
                     chart_hist = c_h.loc[mask].copy()
                     
-                    # 1. GLAVNI GRAFIKON: Broj otvorenih restorana
                     st.image(kreiraj_timeline_grafikon(chart_hist, None, "Istorijat: Broj otvorenih restorana", metrika="Otvoreno", ylabel="Otvoreni restorani"), use_container_width=True)
                     
-                    # 2. I 3. GRAFIKON: Vreme dostave i Akcije
                     ch1, ch2 = st.columns(2)
                     with ch1:
                         st.image(kreiraj_timeline_grafikon(chart_hist, None, "Istorijat: Prosečno vreme dostave", metrika="Avg_Vreme", ylabel="Vreme dostave (min)"), use_container_width=True)
@@ -983,7 +983,7 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
 
             st.dataframe(
                 disp_df.style.apply(style_rows, axis=1), 
-                use_container_width=True, hide_index=True, height=800, # POVEĆANA VISINA
+                use_container_width=True, hide_index=True, height=800,
                 column_config={
                     "Link": st.column_config.LinkColumn("Link", display_text="Otvori na sajtu"),
                     "Akcija": st.column_config.TextColumn("Akcija", width="large")
@@ -1015,7 +1015,7 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
                 df_uporedni = df_uporedni[(df_uporedni['Status Wolt'].isin(filter_wolt_up)) & (df_uporedni['Status Glovo'].isin(filter_glovo_up))]
                 
                 if not df_uporedni.empty:
-                    st.dataframe(df_uporedni.style.map(lambda val: f'color: {"#27ae60" if val=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status Wolt', 'Status Glovo']), use_container_width=True, hide_index=True, height=800, column_config={"Link Wolt": st.column_config.LinkColumn("Link Wolt", display_text="Otvori Wolt"), "Link Glovo": st.column_config.LinkColumn("Link Glovo", display_text="Otvori Glovo")}) # POVEĆANA VISINA
+                    st.dataframe(df_uporedni.style.map(lambda val: f'color: {"#27ae60" if val=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status Wolt', 'Status Glovo']), use_container_width=True, hide_index=True, height=800, column_config={"Link Wolt": st.column_config.LinkColumn("Link Wolt", display_text="Otvori Wolt"), "Link Glovo": st.column_config.LinkColumn("Link Glovo", display_text="Otvori Glovo")})
                 else:
                     st.info("Nema restorana koji odgovaraju odabranim filterima statusa.")
             else:
