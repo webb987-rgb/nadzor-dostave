@@ -7,6 +7,7 @@ import re
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import random
 from io import BytesIO
 from pathlib import Path
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
@@ -225,6 +226,46 @@ def kreiraj_grafikon_status(df_sub, naslov):
     imgdata = BytesIO(); fig.savefig(imgdata, format='png', bbox_inches='tight', dpi=150); imgdata.seek(0); plt.close(fig)
     return imgdata
 
+def kreiraj_grafikon_vreme_dostave(df_sub, naslov):
+    wolt_df = df_sub[(df_sub["Platforma"] == "Wolt") & (df_sub["Vreme_Broj"].notna())]
+    glovo_df = df_sub[(df_sub["Platforma"] == "Glovo") & (df_sub["Vreme_Broj"].notna())]
+    
+    # OSIGURAČ ZA GRAPH: Ako nema podataka (NaN), stavi nulu da ne puca
+    w_avg = wolt_df["Vreme_Broj"].dropna().mean() if not wolt_df["Vreme_Broj"].dropna().empty else 0
+    w_avg = 0 if pd.isna(w_avg) else w_avg
+    
+    g_avg = glovo_df["Vreme_Broj"].dropna().mean() if not glovo_df["Vreme_Broj"].dropna().empty else 0
+    g_avg = 0 if pd.isna(g_avg) else g_avg
+    
+    fig, ax = plt.subplots(figsize=(5, 4), facecolor='#ffffff')
+    prikazi_wolt = "Wolt" in df_sub["Platforma"].values or df_sub.empty
+    prikazi_glovo = "Glovo" in df_sub["Platforma"].values or df_sub.empty
+    
+    if prikazi_wolt and prikazi_glovo:
+        bars = ax.bar([0.2, 0.8], [w_avg, g_avg], color=['#00c2e8', '#ffc244'], width=0.35)
+        ax.set_xticks([0.2, 0.8]); ax.set_xticklabels(['Wolt', 'Glovo'], fontweight='bold'); ax.set_xlim(-0.2, 1.2)
+        bar_list = [w_avg, g_avg]; pos_list = [0.2, 0.8]
+    elif prikazi_wolt:
+        bars = ax.bar([0.5], [w_avg], color=['#00c2e8'], width=0.35)
+        ax.set_xticks([0.5]); ax.set_xticklabels(['Wolt'], fontweight='bold'); ax.set_xlim(0, 1)
+        bar_list = [w_avg]; pos_list = [0.5]
+    elif prikazi_glovo:
+        bars = ax.bar([0.5], [g_avg], color=['#ffc244'], width=0.35)
+        ax.set_xticks([0.5]); ax.set_xticklabels(['Glovo'], fontweight='bold'); ax.set_xlim(0, 1)
+        bar_list = [g_avg]; pos_list = [0.5]
+        
+    ax.set_ylabel('Prosečno vreme (min)', fontsize=11, fontweight='bold')
+    ax.set_title(naslov, fontsize=12, fontweight='bold', color='#2c3e50')
+    
+    for i, v in zip(pos_list, bar_list):
+        if v > 0: ax.text(i, v + 0.5, f"{v:.1f} min", ha='center', va='bottom', fontweight='bold', color='#2c3e50', fontsize=9)
+        
+    max_v = max(bar_list) if len(bar_list) > 0 and max(bar_list) > 0 else 10
+    ax.set_ylim(0, max_v * 1.2)
+    plt.tight_layout()
+    imgdata = BytesIO(); fig.savefig(imgdata, format='png', bbox_inches='tight', dpi=150); imgdata.seek(0); plt.close(fig)
+    return imgdata
+
 # ---------------- EKSTRAKCIJA PODATAKA ----------------
 def ukloni_kvacice(tekst):
     if not tekst: return ""
@@ -233,7 +274,7 @@ def ukloni_kvacice(tekst):
 
 def izvuci_ime(tekst):
     if not tekst: return ""
-    for line in tekst.split('\n'):
+    for line in str(tekst).split('\n'):
         line = line.strip()
         if not line or '%' in line or ("min" in line.lower() and re.search(r'\d+', line.lower())): continue
         if any(x in line.lower() for x in ["rsd", "din", "promo", "novo", "odlično", "besplatna dostava", "artikli", "narudžb", "popust", "off", "discount"]): continue
@@ -296,10 +337,11 @@ def izvuci_akciju(tekst, html, plat):
 
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', str(ime).lower())
 
-# ---------------- ORIGINALNO SKROLOVANJE SA LIVE UPDATE-OM ----------------
+# ---------------- ORIGINALNO LJUDSKO SKROLOVANJE (Provereno radi na oba sajta) ----------------
 async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph, live_ph, live_state):
     results_dict = {}
     prethodni_broj = 0; pokusaji_na_dnu = 0
+    max_pokusaja = 8 # Siguran broj pokušaja na dnu za velike gradove
     
     while True:
         if plat == "Wolt":
@@ -348,10 +390,10 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph, live_ph
         h = await page.evaluate("document.body.scrollHeight")
         s = await page.evaluate("window.scrollY + window.innerHeight")
         
-        if s >= h - 50:
+        if s >= h - 100:
             pokusaji_na_dnu += 1
-            await asyncio.sleep(1.5)
-            if pokusaji_na_dnu >= 5: break 
+            await asyncio.sleep(2)
+            if pokusaji_na_dnu >= max_pokusaja: break 
             
     return list(results_dict.values())
 
@@ -395,13 +437,12 @@ async def scrape_wolt(context_wolt, address, log_ph, live_ph, live_state, error_
             
         rez = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", address, log_ph, live_ph, live_state)
         
-        # 🚨 PROVERA GREŠKE: Slikaj ako nema restorana
+        # 🚨 PROVERA GREŠKE: Slikaj ako je našao sumnjivo malo restorana
         if len(rez) < 5:
             err_path = str(ERRORS_DIR / f"Wolt_Upozorenje_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
             try:
                 await page.screenshot(path=err_path)
                 error_screenshots.append(err_path)
-                log_msg(f"[WOLT UPOZORENJE] Skoro prazno! Slikano: {err_path}", log_ph)
             except: pass
             
         return rez
@@ -461,13 +502,12 @@ async def scrape_glovo(context_glovo, address, log_ph, live_ph, live_state, erro
         page.set_default_timeout(60000) 
         rez = await pametno_skrolovanje_i_ekstrakcija(page, "Glovo", address, log_ph, live_ph, live_state)
         
-        # 🚨 PROVERA GREŠKE: Slikaj ako nema restorana
+        # 🚨 PROVERA GREŠKE: Slikaj ako je našao sumnjivo malo restorana
         if len(rez) < 5:
             err_path = str(ERRORS_DIR / f"Glovo_Upozorenje_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
             try:
                 await page.screenshot(path=err_path)
                 error_screenshots.append(err_path)
-                log_msg(f"[GLOVO UPOZORENJE] Glovo nije našao restorane! Slikano: {err_path}", log_ph)
             except: pass
 
         return rez
@@ -481,12 +521,13 @@ async def scrape_glovo(context_glovo, address, log_ph, live_ph, live_state, erro
     finally:
         if page: await page.close()
 
-# ---------------- PROCES SKENIRANJA (BEZ MREŽNIH BLOKADA) ----------------
+# ---------------- SEKVENCIJALNI PROCES SKENIRANJA (BEZ MREŽNIH BLOKADA) ----------------
 async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=False, email_primaoca=""):
     sve = []
     error_screenshots = [] 
     
     async with async_playwright() as p:
+        # Standardno otvaranje Chromiuma bez ikakvih blokatora slika
         browser = await p.chromium.launch(
             headless=True,
             args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--no-sandbox"]
@@ -504,10 +545,12 @@ async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=Fa
             
             if i > 0: await asyncio.sleep(5)
             
+            # 1. GLOVO
             context_glovo = await browser.new_context(**ga)
             sve.extend(await scrape_glovo(context_glovo, adr, log_ph, live_ph, live_state, error_screenshots))
             await context_glovo.close() 
             
+            # 2. WOLT
             context_wolt = await browser.new_context(**wa)
             sve.extend(await scrape_wolt(context_wolt, adr, log_ph, live_ph, live_state, error_screenshots))
             await context_wolt.close() 
@@ -520,7 +563,6 @@ async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=Fa
         
         pdf_fajlovi = []
         if generisi_pdf:
-            log_msg("Generišem PDF izveštaje...", log_ph)
             zbirni = napravi_zbirni_pdf(df_s, df_h)
             if zbirni: pdf_fajlovi.append(zbirni)
             for adr in df_s["Adresa"].unique():
@@ -555,10 +597,9 @@ with st.sidebar:
     auto_refresh = st.checkbox("🔄 Automatsko osvežavanje", value=False)
     sleep_interval = st.number_input("⏱️ Interval (min):", min_value=1, value=60, disabled=not auto_refresh)
     
-    generisi_pdf = st.checkbox("📄 Generiši PDF", value=False)
+    generisi_pdf = st.checkbox("📄 Generiši PDF izveštaje", value=False)
     email_unos = st.text_input("📧 Pošalji na email:", placeholder="tvoj@email.com") if generisi_pdf else ""
     
-    timer_ph = st.empty()
     c1, c2 = st.columns(2)
     with c1:
         if st.button("▶️ POKRENI", type="primary", use_container_width=True): 
@@ -590,12 +631,15 @@ with st.sidebar:
             st.session_state.last_run = os.path.getmtime(opcije[izabrani_fajl])
             st.rerun()
     with col_obrisi:
+        # DUGME ZA BRISANJE
         if st.button("🗑️ Obriši", type="secondary", use_container_width=True) and opcije[izabrani_fajl]:
             os.remove(opcije[izabrani_fajl])
-            if st.session_state.loaded_history: st.session_state.df_sve = pd.DataFrame(); st.session_state.loaded_history = False
+            if st.session_state.loaded_history: 
+                st.session_state.df_sve = pd.DataFrame()
+                st.session_state.loaded_history = False
             st.rerun()
 
-# ================= GLAVNI INTERFEJS (TABS) =================
+# ================= GLAVNI INTERFEJS (TABS & LOADING) =================
 if st.session_state.pokrenuto or st.session_state.loaded_history:
 
     if st.session_state.pokrenuto:
@@ -604,18 +648,22 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
             st.warning("⚠️ Unesite bar prvu adresu da biste skenirali!"); st.session_state.pokrenuto = False; st.rerun()
 
         if time.time() - st.session_state.last_run >= sleep_interval * 60 or st.session_state.last_run == 0:
-            live_ui_ph = st.empty() # Placeholder za moderne brojače
-            sl = st.empty() # Sistemski logovi
-            live_state = {"Wolt": 0, "Glovo": 0}
             
-            df, hi, pdf, err_imgs = asyncio.run(proces_skeniranja(lista_adresa, sl, live_ui_ph, live_state, generisi_pdf, email_unos))
-            
-            if not df.empty:
-                df.to_csv(OUTPUT_DIR / f"Detaljno_{timestamp()}.csv", index=False)
+            # MODERAN LOADING SPINNER
+            with st.spinner('🔄 Skripta vredno rudari podatke, molim te sačekaj...'):
+                live_ui_ph = st.empty() 
+                sl = st.empty() 
+                live_state = {"Wolt": 0, "Glovo": 0}
+                
+                df, hi, pdf, err_imgs = asyncio.run(proces_skeniranja(lista_adresa, sl, live_ui_ph, live_state, generisi_pdf, email_unos))
+                
+                if not df.empty:
+                    df.to_csv(OUTPUT_DIR / f"Detaljno_{timestamp()}.csv", index=False)
 
-            live_ui_ph.empty()
-            st.session_state.df_sve, st.session_state.df_history, st.session_state.pdf_fajlovi, st.session_state.error_screenshots, st.session_state.last_run = df, hi, pdf, err_imgs, time.time()
-            sl.empty(); st.rerun()
+                live_ui_ph.empty()
+                st.session_state.df_sve, st.session_state.df_history, st.session_state.pdf_fajlovi, st.session_state.error_screenshots, st.session_state.last_run = df, hi, pdf, err_imgs, time.time()
+                sl.empty()
+            st.rerun()
 
     df = st.session_state.df_sve
     if not df.empty:
@@ -625,7 +673,7 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
         if st.session_state.loaded_history: st.info("📂 **Pregledate arhivirani izveštaj.**")
         else: st.success(f"✅ Skeniranje završeno u: {datetime.datetime.fromtimestamp(st.session_state.last_run, LOCAL_TZ).strftime('%H:%M:%S')}")
         
-        # OVO JE NOVO - SVE IDE U TABOVE DA NE BUDE PREDUGAČKO
+        # MODERNI TABOVI
         tab_dash, tab_akcije, tab_uporedno, tab_lista, tab_istorija = st.tabs([
             "📊 Dashboard", "🎁 Akcije i Popusti", "⚖️ Uporedni Prikaz", "🔍 Lista Restorana", "📅 Istorijat"
         ])
@@ -720,7 +768,7 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
         # --- GREŠKE I PDF OSTAJU ISPOD TABOVA DA BUDU UVEK VIDLJIVI ---
         if st.session_state.get('error_screenshots'):
             st.markdown("---")
-            st.error("⚠️ PAŽNJA: Skripta je zabeležila sumnjive prazne ekrane. Pogledaj ispod gde je sajt zakočio:")
+            st.error("⚠️ PAŽNJA: Skripta je zabeležila greške ili sumnjivo mali broj restorana. Pogledaj screenshotove sa lica mesta:")
             ec = st.columns(len(st.session_state.error_screenshots))
             for idx, img_path in enumerate(st.session_state.error_screenshots):
                 with ec[idx % len(ec)]: st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
@@ -736,7 +784,12 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
         if auto_refresh:
             rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
             while rem > 0:
-                mins, secs = divmod(rem, 60)
-                timer_ph.info(f"⏳ Odbrojavanje do sledećeg skeniranja: **{mins:02d}:{secs:02d}**")
+                # Da bi se tajmer vrteo moramo osvežiti tekst, ali pošto je ui zakucan sa time.sleep, Streamlit koristi empty()
+                st.sidebar.info(f"⏳ Odbrojavanje do sledećeg skeniranja: **{rem//60:02d}:{rem%60:02d}**")
                 time.sleep(1); rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
             st.rerun()
+        else:
+            st.sidebar.success("✅ Skeniranje završeno. Kliknite 'Pokreni' za novo skeniranje.")
+        
+else: 
+    st.info("Sistem je spreman. Unesite parametre i kliknite 'Pokreni'.")
