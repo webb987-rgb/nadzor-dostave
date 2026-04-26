@@ -485,7 +485,7 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, li
         
     return list(results_dict.values())
 
-# ---------------- SCRAPERS (Vraćeni tačno iz koda gde je radio Wolt) ----------------
+# ---------------- SCRAPERS (ZALEĐENO IZ SVETOG GRALA) ----------------
 async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None):
     page = None
     try:
@@ -513,7 +513,7 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
             except PlaywrightTimeoutError: pass
             
         except PlaywrightTimeoutError:
-            log_msg(f"[WOLT] VIP mod. Menjam adresu u header-u za: {address}", log_ph)
+            log_msg(f"[WOLT] VIP mod (Ulogovan). Menjam adresu u header-u za: {address}", log_ph)
             try:
                 header_btn = page.locator("[data-test-id='header.address-select-button']")
                 if not await header_btn.is_visible():
@@ -687,7 +687,7 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
     finally:
         if page: await page.close()
 
-# ---------------- SEKVENCIJALNI PROCES SKENIRANJA (OBNOVLJENA LOGIKA) ----------------
+# ---------------- SEKVENCIJALNI PROCES SKENIRANJA ----------------
 async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=False, email_primaoca=""):
     sve = []
     error_screenshots = [] 
@@ -828,7 +828,9 @@ with st.sidebar:
     with col_obrisi:
         if st.button("🗑️ Obriši", type="secondary", use_container_width=True) and opcije[izabrani_fajl]:
             os.remove(opcije[izabrani_fajl])
-            if st.session_state.loaded_history: st.session_state.df_sve = pd.DataFrame(); st.session_state.loaded_history = False
+            if st.session_state.loaded_history: 
+                st.session_state.df_sve = pd.DataFrame()
+                st.session_state.loaded_history = False
             st.rerun()
 
     st.markdown("---")
@@ -858,6 +860,7 @@ with st.sidebar:
             else:
                 st.error("❌ Netačna lozinka!")
 
+# ================= GLAVNI INTERFEJS =================
 if st.session_state.pokrenuto or st.session_state.loaded_history:
 
     if st.session_state.pokrenuto:
@@ -878,10 +881,9 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
                 if not df.empty:
                     df.to_csv(OUTPUT_DIR / f"Detaljno_{timestamp()}.csv", index=False)
 
-                live_ui_ph.empty()
-                st.session_state.df_sve, st.session_state.df_history, st.session_state.pdf_fajlovi, st.session_state.error_screenshots, st.session_state.last_run = df, hi, pdf, err_imgs, time.time()
-                sl.empty()
-            st.rerun()
+            live_ui_ph.empty()
+            st.session_state.df_sve, st.session_state.df_history, st.session_state.pdf_fajlovi, st.session_state.error_screenshots, st.session_state.last_run = df, hi, pdf, err_imgs, time.time()
+            sl.empty(); st.rerun()
 
     df = st.session_state.df_sve
     if not df.empty:
@@ -894,7 +896,7 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
         tab_dash, tab_lista, tab_uporedno, tab_akcije = st.tabs([
             "📊 Dashboard", "🔍 Lista Restorana", "⚖️ Uporedni Prikaz", "🎁 Akcije i Popusti"
         ])
-        
+
         adrese_un = list(df["Adresa"].unique())
         
         with tab_dash:
