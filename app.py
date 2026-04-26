@@ -154,7 +154,24 @@ def sacuvaj_u_istoriju(df):
     for adr in adrese:
         for plat in ["Wolt", "Glovo"]:
             sub = df[(df["Adresa"] == adr) & (df["Platforma"] == plat)]
-            istorija_podaci.append({ "Datum": datum_sada, "Vreme": vreme_sada, "Adresa": adr, "Platforma": plat, "Otvoreno": len(sub[sub["Status"] == "Otvoreno"]), "Zatvoreno": len(sub[sub["Status"] == "Zatvoreno"]) })
+            if sub.empty: continue
+            
+            otvoreno = len(sub[sub["Status"] == "Otvoreno"])
+            zatvoreno = len(sub[sub["Status"] == "Zatvoreno"])
+            
+            # Dodato za istoriju vremena dostave i akcija
+            avg_vreme = sub["Vreme_Broj"].dropna().mean()
+            avg_vreme = 0 if pd.isna(avg_vreme) else round(avg_vreme, 1)
+            
+            broj_akcija = len(sub[sub["Akcija"] != "-"])
+            
+            istorija_podaci.append({ 
+                "Datum": datum_sada, "Vreme": vreme_sada, 
+                "Adresa": adr, "Platforma": plat, 
+                "Otvoreno": otvoreno, "Zatvoreno": zatvoreno,
+                "Avg_Vreme": avg_vreme, "Broj_Akcija": broj_akcija
+            })
+            
     df_novo = pd.DataFrame(istorija_podaci)
     fajl_str = str(HISTORY_FILE)
     if os.path.exists(fajl_str):
@@ -165,19 +182,28 @@ def sacuvaj_u_istoriju(df):
     st.session_state.df_history = df_kombinovano
     return df_kombinovano
 
-def kreiraj_timeline_grafikon(df_hist, adresa=None, custom_naslov=None, is_pdf=False):
+def kreiraj_timeline_grafikon(df_hist, adresa=None, custom_naslov=None, is_pdf=False, metrika="Otvoreno", ylabel="Broj otvorenih restorana"):
     df_sub = df_hist.copy()
+    
+    # Ako očitavamo staru CSV istoriju koja nije imala ove kolone, stavi ih na nulu da ne puca
+    if metrika not in df_sub.columns:
+        df_sub[metrika] = 0
+
     if adresa:
         df_sub = df_sub[df_sub["Adresa"] == adresa]
-        naslov = f'Istorijat aktivnosti - {adresa.upper()}'
+        naslov = custom_naslov if custom_naslov else f'Istorijat aktivnosti - {adresa.upper()}'
     else:
         if not df_sub.empty and 'Platforma' in df_sub.columns:
             if 'Datum' in df_sub.columns and 'Vreme' in df_sub.columns:
-                df_sub = df_sub.groupby(["Datum", "Vreme", "Platforma"]).sum(numeric_only=True).reset_index()
-        naslov = 'Zbirni Istorijat aktivnosti (Sve Adrese)'
-    if custom_naslov: naslov = custom_naslov
+                if metrika == "Avg_Vreme":
+                    df_sub = df_sub.groupby(["Datum", "Vreme", "Platforma"])[metrika].mean().reset_index()
+                else:
+                    df_sub = df_sub.groupby(["Datum", "Vreme", "Platforma"])[metrika].sum().reset_index()
+        naslov = custom_naslov if custom_naslov else 'Zbirni Istorijat aktivnosti (Sve Adrese)'
+        
     fig, ax = plt.subplots(figsize=(10, 4), facecolor='#ffffff')
     ax.set_facecolor('#f8f9fa')
+    
     if len(df_sub) == 0:
         ax.text(0.5, 0.5, "Nema istorijskih podataka", ha='center', va='center')
         ax.axis('off')
@@ -186,20 +212,25 @@ def kreiraj_timeline_grafikon(df_hist, adresa=None, custom_naslov=None, is_pdf=F
         if jedan_dan and 'Vreme' in df_sub.columns: df_sub["X_Label"] = df_sub["Vreme"]
         elif 'Datum' in df_sub.columns and 'Vreme' in df_sub.columns: df_sub["X_Label"] = df_sub["Datum"].str[-5:].str.replace('-', '.') + " \n" + df_sub["Vreme"]
         else: df_sub["X_Label"] = "Nepoznato"
+        
         wolt_data = df_sub[df_sub["Platforma"] == "Wolt"]
         glovo_data = df_sub[df_sub["Platforma"] == "Glovo"]
         if is_pdf: wolt_data, glovo_data = wolt_data.tail(48), glovo_data.tail(48)
-        if not wolt_data.empty: ax.plot(wolt_data["X_Label"], wolt_data["Otvoreno"], marker='o', markersize=4, linestyle='-', color='#00c2e8', linewidth=2.5, label='Wolt Otvoreni')
-        if not glovo_data.empty: ax.plot(glovo_data["X_Label"], glovo_data["Otvoreno"], marker='s', markersize=4, linestyle='-', color='#ffc244', linewidth=2.5, label='Glovo Otvoreni')
-        ax.set_ylabel('Broj otvorenih restorana', fontsize=11, fontweight='bold')
+        
+        if not wolt_data.empty: ax.plot(wolt_data["X_Label"], wolt_data[metrika], marker='o', markersize=4, linestyle='-', color='#00c2e8', linewidth=2.5, label='Wolt')
+        if not glovo_data.empty: ax.plot(glovo_data["X_Label"], glovo_data[metrika], marker='s', markersize=4, linestyle='-', color='#ffc244', linewidth=2.5, label='Glovo')
+        
+        ax.set_ylabel(ylabel, fontsize=11, fontweight='bold')
         ax.set_title(naslov, fontsize=14, fontweight='bold', color='#2c3e50', pad=15)
         ax.legend(frameon=True, fontsize=10, loc='lower center', bbox_to_anchor=(0.5, -0.3), ncol=2) 
         ax.grid(True, linestyle='--', alpha=0.6)
+        
         n_ticks = len(wolt_data) if not wolt_data.empty else (len(glovo_data) if not glovo_data.empty else 0)
         step = max(1, n_ticks // 15) 
         for index, label in enumerate(ax.xaxis.get_ticklabels()):
             if index % step != 0: label.set_visible(False)
         plt.xticks(rotation=45 if not jedan_dan else 0, fontsize=9); plt.yticks(fontsize=10)
+        
     plt.tight_layout()
     imgdata = BytesIO(); fig.savefig(imgdata, format='png', bbox_inches='tight', dpi=150); imgdata.seek(0); plt.close(fig)
     return imgdata
@@ -230,7 +261,6 @@ def kreiraj_grafikon_vreme_dostave(df_sub, naslov):
     wolt_df = df_sub[(df_sub["Platforma"] == "Wolt") & (df_sub["Vreme_Broj"].notna())]
     glovo_df = df_sub[(df_sub["Platforma"] == "Glovo") & (df_sub["Vreme_Broj"].notna())]
     
-    # OSIGURAČ ZA GRAPH: Ako nema podataka (NaN), stavi nulu da ne puca
     w_avg = wolt_df["Vreme_Broj"].dropna().mean() if not wolt_df["Vreme_Broj"].dropna().empty else 0
     w_avg = 0 if pd.isna(w_avg) else w_avg
     
@@ -369,7 +399,6 @@ def izvuci_akciju(tekst, html, plat):
     return "\n".join(res) if res else "-"
 
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', str(ime).lower())
-
 
 # ---------------- ORIGINALNO LJUDSKO SKROLOVANJE (Ne diramo logiku!) ----------------
 async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, live_ph=None, live_state=None):
@@ -854,7 +883,7 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
         else:
             st.success(f"✅ Osveženo u: {datetime.datetime.fromtimestamp(st.session_state.last_run, LOCAL_TZ).strftime('%H:%M:%S')}")
         
-        # POREĐENJE TIPOVA U TABOVIMA
+        # POREĐENJE TIPOVA U TABOVIMA: Dashboard -> Lista -> Uporedni -> Akcije
         tab_dash, tab_lista, tab_uporedno, tab_akcije = st.tabs([
             "📊 Dashboard", "🔍 Lista Restorana", "⚖️ Uporedni Prikaz", "🎁 Akcije i Popusti"
         ])
@@ -880,9 +909,11 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
             with ca: st.image(kreiraj_grafikon_status(c_df, "Uporedni Status"), use_container_width=True)
             with cb: st.image(kreiraj_grafikon_vreme_dostave(c_df, "Prosečno vreme dostave"), use_container_width=True)
 
+            # ISTORIJAT JE SADA NA DNU DASHBOARDA
             st.markdown("---")
             st.markdown("##### 📅 Istorijat Aktivnosti (Filter Vremena)")
             hist_df = st.session_state.df_history.copy()
+            
             if not hist_df.empty:
                 c_h = hist_df if graf_adr == "Sve adrese" else hist_df[hist_df["Adresa"] == graf_adr]
                 if not c_h.empty and 'Datum' in c_h.columns and 'Vreme' in c_h.columns:
@@ -901,7 +932,16 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
                     
                     mask = (c_h['Datetime'] >= start_dt) & (c_h['Datetime'] <= end_dt)
                     chart_hist = c_h.loc[mask].copy()
-                    st.image(kreiraj_timeline_grafikon(chart_hist, None, "Istorijat aktivnosti"), use_container_width=True)
+                    
+                    # 1. GLAVNI GRAFIKON: Broj otvorenih restorana
+                    st.image(kreiraj_timeline_grafikon(chart_hist, None, "Istorijat: Broj otvorenih restorana", metrika="Otvoreno", ylabel="Otvoreni restorani"), use_container_width=True)
+                    
+                    # 2. I 3. GRAFIKON: Vreme dostave i Akcije
+                    ch1, ch2 = st.columns(2)
+                    with ch1:
+                        st.image(kreiraj_timeline_grafikon(chart_hist, None, "Istorijat: Prosečno vreme dostave", metrika="Avg_Vreme", ylabel="Vreme dostave (min)"), use_container_width=True)
+                    with ch2:
+                        st.image(kreiraj_timeline_grafikon(chart_hist, None, "Istorijat: Broj restorana na akciji", metrika="Broj_Akcija", ylabel="Broj akcija"), use_container_width=True)
                 else:
                     st.info("Nema istorije za odabranu adresu.")
             else:
@@ -943,7 +983,7 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
 
             st.dataframe(
                 disp_df.style.apply(style_rows, axis=1), 
-                use_container_width=True, hide_index=True, height=800,
+                use_container_width=True, hide_index=True, height=800, # POVEĆANA VISINA
                 column_config={
                     "Link": st.column_config.LinkColumn("Link", display_text="Otvori na sajtu"),
                     "Akcija": st.column_config.TextColumn("Akcija", width="large")
@@ -975,7 +1015,7 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
                 df_uporedni = df_uporedni[(df_uporedni['Status Wolt'].isin(filter_wolt_up)) & (df_uporedni['Status Glovo'].isin(filter_glovo_up))]
                 
                 if not df_uporedni.empty:
-                    st.dataframe(df_uporedni.style.map(lambda val: f'color: {"#27ae60" if val=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status Wolt', 'Status Glovo']), use_container_width=True, hide_index=True, height=800, column_config={"Link Wolt": st.column_config.LinkColumn("Link Wolt", display_text="Otvori Wolt"), "Link Glovo": st.column_config.LinkColumn("Link Glovo", display_text="Otvori Glovo")})
+                    st.dataframe(df_uporedni.style.map(lambda val: f'color: {"#27ae60" if val=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status Wolt', 'Status Glovo']), use_container_width=True, hide_index=True, height=800, column_config={"Link Wolt": st.column_config.LinkColumn("Link Wolt", display_text="Otvori Wolt"), "Link Glovo": st.column_config.LinkColumn("Link Glovo", display_text="Otvori Glovo")}) # POVEĆANA VISINA
                 else:
                     st.info("Nema restorana koji odgovaraju odabranim filterima statusa.")
             else:
