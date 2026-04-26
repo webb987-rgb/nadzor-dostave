@@ -103,7 +103,7 @@ def posalji_email(pdf_putanje, primaoci_str, log_ph=None):
             msg['From'] = EMAIL_POSILJAOCA
             msg['To'] = primalac
             msg['Subject'] = f"Izveštaji o dostavi - {lokalno_vreme().strftime('%d.%m. u %H:%M')}"
-            body = "Pozdrav šefe,\n\nU prilogu se nalaze zbirni i pojedinačni izveštaji o statusu restorana na platformama Wolt i Glovo.\n\nSistem je uspješno završio ciklus."
+            body = "Pozdrav šefe,\n\nU prilogu se nalaze zbirni i pojedinačni izveštaji o statusu restorana na platformama Wolt i Glovo.\n\nSistem je uspešno završio ciklus."
             msg.attach(MIMEText(body, 'plain'))
 
             for pdf_putanja in pdf_putanje:
@@ -120,9 +120,9 @@ def posalji_email(pdf_putanje, primaoci_str, log_ph=None):
             text = msg.as_string()
             server.sendmail(EMAIL_POSILJAOCA, primalac, text)
             server.quit()
-        log_msg("[USPEH] Svi emailovi su uspješno poslati!", log_ph)
+        log_msg("[USPEH] Svi emailovi su uspešno poslati!", log_ph)
     except Exception as e:
-        log_msg(f"[GREŠKA] Slanje emaila nije uspjelo: {e}", log_ph)
+        log_msg(f"[GREŠKA] Slanje emaila nije uspelo: {e}", log_ph)
 
 # ---------------- ISTORIJA I GRAFICI ----------------
 def sacuvaj_u_istoriju(df):
@@ -442,30 +442,11 @@ def izvuci_akciju(tekst, html, plat):
 
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', ime.lower())
 
-# ---------------- LJUDSKO SKROLOVANJE SA RADAROM (NETWORK INTERCEPTION) ----------------
+# ---------------- LJUDSKO SKROLOVANJE (Kopirano iz videa - Ostavljeno bez mrežnih blokada) ----------------
 async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, prog_bar=None):
     results_dict = {}
     prethodni_broj = 0
     pokusaji_na_dnu = 0
-    
-    # === RADAR SISTEM (Prati šta Glovo skida u pozadini) ===
-    radar = {"aktivno": False, "poslednji_ulov": time.time()}
-
-    async def na_zahtev(request):
-        # Ako Glovo zatraži novih 50 restorana, radar se pali
-        if "offset=" in request.url and "limit=" in request.url:
-            radar["aktivno"] = True
-
-    async def na_odgovor(response):
-        # Kad podaci stignu (200 OK), radar beleži vreme
-        if "offset=" in response.url and "limit=" in response.url and response.status == 200:
-            radar["aktivno"] = False
-            radar["poslednji_ulov"] = time.time()
-
-    if plat == "Glovo":
-        page.on("request", na_zahtev)
-        page.on("response", na_odgovor)
-    # ========================================================
     
     while True:
         if plat == "Wolt":
@@ -527,30 +508,16 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, pr
             prethodni_broj = trenutni
             pokusaji_na_dnu = 0
             
-        await page.evaluate("window.scrollBy(0, window.innerHeight);")
-        await asyncio.sleep(0.8)
+        await page.evaluate("window.scrollBy(0, 500);")
+        await asyncio.sleep(0.5)
         
         h = await page.evaluate("document.body.scrollHeight")
         s = await page.evaluate("window.scrollY + window.innerHeight")
         
-        if s >= h - 100:
+        if s >= h - 50:
             pokusaji_na_dnu += 1
-            
-            if plat == "Glovo":
-                # AKO JE RADAR AKTIVAN (Glovo skida podatke), resetujemo tajmer i čekamo!
-                if radar["aktivno"]:
-                    pokusaji_na_dnu = 0
-                    await asyncio.sleep(2)
-                    continue
-                # Ako je upravo skinuo (pre manje od 3 sekunde), damo mu vremena da nacrta
-                elif time.time() - radar["poslednji_ulov"] < 3.0:
-                    pokusaji_na_dnu = 0
-                    await asyncio.sleep(1.5)
-                    continue
-
             await asyncio.sleep(1.5)
             
-            # Kraj samo ako smo na dnu, i radar se potpuno ućutao
             if pokusaji_na_dnu >= 5: 
                 break 
         
@@ -742,6 +709,94 @@ async def scrape_glovo(context_glovo, address, log_ph=None, error_screenshots=No
     finally:
         if page: await page.close()
 
+# ---------------- PDF LOGIC ----------------
+def format_pdf_stavka(tekst, status, stil):
+    boja = "#27ae60" if status == "Otvoreno" else "#e74c3c"
+    return Paragraph(f"<font color='{boja}' size=16>&bull;</font> {tekst}", stil)
+
+def napravi_pdf_za_adresu(df_adr, adr, df_hist):
+    p_path = str(OUTPUT_DIR / f"Izvestaj_{ukloni_kvacice(adr).replace(' ', '_')}_{timestamp()}.pdf")
+    doc = SimpleDocTemplate(p_path, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
+    styles = getSampleStyleSheet()
+    ns = ParagraphStyle('Naslov', parent=styles['Title'], textColor=colors.HexColor("#2c3e50"), fontSize=20, spaceAfter=10)
+    ps = ParagraphStyle('Podnaslov', parent=styles['Heading2'], textColor=colors.HexColor("#2980b9"), fontSize=16, spaceBefore=20, spaceAfter=15)
+    cs = ParagraphStyle('Cell', parent=styles['Normal'], fontSize=10, leading=14)
+
+    elements = [Paragraph(f"Izvestaj o Dostavi - {ukloni_kvacice(adr).upper()}", ns)]
+    tab = [["Platforma", "Ukupno Nadjeno", "Otvoreno", "Zatvoreno"]]
+    for plat in ["Wolt", "Glovo"]:
+        sub = df_adr[df_adr["Platforma"] == plat]
+        if not sub.empty: tab.append([plat, len(sub), len(sub[sub["Status"] == "Otvoreno"]), len(sub[sub["Status"] == "Zatvoreno"])])
+    
+    t_z = Table(tab, colWidths=[120, 100, 100, 100])
+    t_z.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.HexColor("#34495e")),('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),('ALIGN', (0,0), (-1,-1), 'CENTER'),('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#bdc3c7"))]))
+    
+    elements.extend([t_z, Spacer(1, 20), Table([[Image(kreiraj_grafikon_status(df_adr, f"Status - {adr}"), width=280, height=224)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), Spacer(1, 10), Table([[Image(kreiraj_timeline_grafikon(df_hist, adr, is_pdf=True), width=500, height=200)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), PageBreak()])
+
+    wn = {}
+    for _, r in df_adr[df_adr["Platforma"] == "Wolt"].iterrows():
+        wn[normalizuj_ime(r["Naziv"])] = r
+        
+    gn = {}
+    for _, r in df_adr[df_adr["Platforma"] == "Glovo"].iterrows():
+        gn[normalizuj_ime(r["Naziv"])] = r
+        
+    sva = set(wn.keys()).union(set(gn.keys()))
+    zaj = sorted([i for i in sva if i in wn and i in gn])
+    sw = sorted([i for i in sva if i in wn and i not in gn])
+    sg = sorted([i for i in sva if i in gn and i not in wn])
+
+    if zaj:
+        elements.append(Paragraph("Zajednicki Restorani", ps))
+        pz = [["Naziv", "Status Wolt", "Status Glovo"]]
+        for n in zaj: 
+            pz.append([Paragraph(wn[n]["Naziv"], cs), format_pdf_stavka(wn[n]["Status"], wn[n]["Status"], cs), format_pdf_stavka(gn[n]["Status"], gn[n]["Status"], cs)])
+        t_c = Table(pz, colWidths=[200, 130, 130])
+        t_c.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.HexColor("#2c3e50")), ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke), ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#bdc3c7"))]))
+        elements.extend([t_c, PageBreak()])
+        
+    if sw:
+        elements.append(Paragraph("Ekskluzivno na Woltu", ps))
+        pod = [["Naziv Restorana"]]
+        for n in sw: 
+            pod.append([format_pdf_stavka(wn[n]["Naziv"], wn[n]["Status"], cs)])
+        t_w = Table(pod, colWidths=[460])
+        t_w.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.HexColor("#3498db")), ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke), ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#bdc3c7"))]))
+        elements.extend([t_w, PageBreak()])
+        
+    if sg:
+        elements.append(Paragraph("Ekskluzivno na Glovu", ps))
+        pod = [["Naziv Restorana"]]
+        for n in sg: 
+            pod.append([format_pdf_stavka(gn[n]["Naziv"], gn[n]["Status"], cs)])
+        t_g = Table(pod, colWidths=[460])
+        t_g.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.HexColor("#f39c12")), ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke), ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#bdc3c7"))]))
+        elements.append(t_g)
+        
+    doc.build(elements)
+    return p_path
+
+def napravi_zbirni_pdf(df, df_hist):
+    p_path = str(OUTPUT_DIR / f"Zbirni_Izvestaj_{timestamp()}.pdf")
+    doc = SimpleDocTemplate(p_path, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
+    styles = getSampleStyleSheet()
+    ns = ParagraphStyle('Naslov', parent=styles['Title'], textColor=colors.HexColor("#2c3e50"), fontSize=20, spaceAfter=20)
+    ps = ParagraphStyle('Podnaslov', parent=styles['Heading2'], textColor=colors.HexColor("#2980b9"), fontSize=16, spaceBefore=20, spaceAfter=15)
+    
+    elements = [Paragraph("Zbirni Izvestaj - Sve Adrese", ns), Table([[Image(kreiraj_grafikon_status(df, "Ukupni Status"), width=280, height=224)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), Spacer(1, 10), Table([[Image(kreiraj_timeline_grafikon(df_hist, None, is_pdf=True), width=500, height=200)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), PageBreak()]
+    
+    for adr in df["Adresa"].unique():
+        df_a = df[df["Adresa"] == adr]
+        elements.append(Paragraph(f"Statistika za lokaciju: {ukloni_kvacice(adr).upper()}", ps))
+        tab = [["Platforma", "Ukupno Nadjeno", "Otvoreno", "Zatvoreno"]]
+        for plat in ["Wolt", "Glovo"]:
+            sub = df_a[df_a["Platforma"] == plat]
+            if not sub.empty: tab.append([plat, len(sub), len(sub[sub["Status"] == "Otvoreno"]), len(sub[sub["Status"] == "Zatvoreno"])])
+        t_a = Table(tab, colWidths=[120, 100, 100, 100])
+        t_a.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.HexColor("#34495e")),('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),('ALIGN', (0,0), (-1,-1), 'CENTER'),('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#bdc3c7"))]))
+        elements.extend([t_a, Spacer(1, 15), Table([[Image(kreiraj_grafikon_status(df_a, f"Trenutni Status - {adr}"), width=280, height=224)]], colWidths=[515], style=[('ALIGN', (0,0), (-1,-1), 'CENTER')]), Spacer(1, 20)])
+    doc.build(elements); return p_path
+
 # ---------------- SEKVENCIJALNI PROCES SKENIRANJA (SPAS ZA RAM) ----------------
 async def proces_skeniranja(adrese, log_ph, prog_bar, generisi_pdf=False, email_primaoca=""):
     sve = []
@@ -882,14 +937,27 @@ with st.sidebar:
         opcije[prikaz] = f
 
     izabrani_fajl = st.selectbox("Učitaj prethodno skeniranje:", list(opcije.keys()))
-    if st.button("📂 Učitaj izveštaj"):
-        fajl = opcije[izabrani_fajl]
-        if fajl:
-            st.session_state.df_sve = pd.read_csv(fajl)
-            st.session_state.pokrenuto = False
-            st.session_state.loaded_history = True
-            st.session_state.last_run = os.path.getmtime(fajl)
-            st.rerun()
+    
+    col_ucitaj, col_obrisi = st.columns(2)
+    with col_ucitaj:
+        if st.button("📂 Učitaj izveštaj"):
+            fajl = opcije[izabrani_fajl]
+            if fajl:
+                st.session_state.df_sve = pd.read_csv(fajl)
+                st.session_state.pokrenuto = False
+                st.session_state.loaded_history = True
+                st.session_state.last_run = os.path.getmtime(fajl)
+                st.rerun()
+    with col_obrisi:
+        if st.button("🗑️ Obriši izabrani", type="secondary"):
+            fajl_za_brisanje = opcije[izabrani_fajl]
+            if fajl_za_brisanje and os.path.exists(fajl_za_brisanje):
+                os.remove(fajl_za_brisanje)
+                # Ako je obrisan fajl trenutno učitan, resetujemo prikaz
+                if st.session_state.loaded_history and st.session_state.last_run == os.path.getmtime(fajl_za_brisanje) if os.path.exists(fajl_za_brisanje) else True:
+                    st.session_state.df_sve = pd.DataFrame()
+                    st.session_state.loaded_history = False
+                st.rerun()
 
 if st.session_state.pokrenuto or st.session_state.loaded_history:
 
