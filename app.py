@@ -405,7 +405,7 @@ async def pametni_dijetalni_mod(route):
     else:
         await route.continue_()
 
-# ---------------- ORIGINALNO LJUDSKO SKROLOVANJE (ZALEĐENO IZ SVETOG GRALA) ----------------
+# ---------------- ORIGINALNO LJUDSKO SKROLOVANJE (ZALEĐENO) ----------------
 async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, live_ph=None, live_state=None):
     results_dict = {}
     prethodni_broj = 0
@@ -485,7 +485,7 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, li
         
     return list(results_dict.values())
 
-# ---------------- SCRAPERS (STEALTH + FAST FAIL) ZALEĐENO IZ SVETOG GRALA ----------------
+# ---------------- SCRAPERS (Vraćeni tačno iz koda gde je radio Wolt) ----------------
 async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None):
     page = None
     try:
@@ -687,7 +687,7 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
     finally:
         if page: await page.close()
 
-# ---------------- SEKVENCIJALNI PROCES SKENIRANJA (ZALEĐENO IZ SVETOG GRALA) ----------------
+# ---------------- SEKVENCIJALNI PROCES SKENIRANJA (OBNOVLJENA LOGIKA) ----------------
 async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=False, email_primaoca=""):
     sve = []
     error_screenshots = [] 
@@ -793,9 +793,7 @@ with st.sidebar:
     sleep_interval = st.number_input("⏱️ Interval (min):", min_value=1, value=60, disabled=not auto_refresh)
     
     generisi_pdf = st.checkbox("📄 Generiši PDF izveštaje", value=False)
-    email_unos = ""
-    if generisi_pdf:
-        email_unos = st.text_input("📧 Pošalji izveštaj na email (opciono):", placeholder="tvoj@email.com")
+    email_unos = st.text_input("📧 Pošalji na email:", placeholder="tvoj@email.com") if generisi_pdf else ""
     
     c1, c2 = st.columns(2)
     with c1:
@@ -812,38 +810,26 @@ with st.sidebar:
     st.markdown("---")
     st.header("📂 Arhiva skeniranja")
     istorija_fajlovi = sorted(list(OUTPUT_DIR.glob("Detaljno_*.csv")), reverse=True)
-    
-    opcije = {"--- Izaberi ---": None}
+    opcije = {"--- Izaberi stari izveštaj ---": None}
     for f in istorija_fajlovi:
         ime = f.stem.replace("Detaljno_", "")
-        try:
-            dt_obj = datetime.datetime.strptime(ime, "%Y%m%d_%H%M%S")
-            prikaz = dt_obj.strftime("%d.%m.%Y u %H:%M:%S")
-        except:
-            prikaz = ime
-        opcije[prikaz] = f
+        try: opcije[datetime.datetime.strptime(ime, "%Y%m%d_%H%M%S").strftime("%d.%m.%Y u %H:%M:%S")] = f
+        except: opcije[ime] = f
 
-    izabrani_fajl = st.selectbox("Učitaj prethodno skeniranje:", list(opcije.keys()), label_visibility="collapsed")
-    
+    izabrani_fajl = st.selectbox("Prethodna skeniranja:", list(opcije.keys()), label_visibility="collapsed")
     col_ucitaj, col_obrisi = st.columns(2)
     with col_ucitaj:
-        if st.button("📂 Učitaj", use_container_width=True):
-            fajl = opcije[izabrani_fajl]
-            if fajl:
-                st.session_state.df_sve = pd.read_csv(fajl)
-                st.session_state.pokrenuto = False
-                st.session_state.loaded_history = True
-                st.session_state.last_run = os.path.getmtime(fajl)
-                st.rerun()
+        if st.button("📂 Učitaj", use_container_width=True) and opcije[izabrani_fajl]:
+            st.session_state.df_sve = pd.read_csv(opcije[izabrani_fajl])
+            st.session_state.pokrenuto = False
+            st.session_state.loaded_history = True
+            st.session_state.last_run = os.path.getmtime(opcije[izabrani_fajl])
+            st.rerun()
     with col_obrisi:
-        if st.button("🗑️ Obriši", type="secondary", use_container_width=True):
-            fajl_za_brisanje = opcije[izabrani_fajl]
-            if fajl_za_brisanje and os.path.exists(fajl_za_brisanje):
-                os.remove(fajl_za_brisanje)
-                if st.session_state.loaded_history and st.session_state.last_run == os.path.getmtime(fajl_za_brisanje) if os.path.exists(fajl_za_brisanje) else True:
-                    st.session_state.df_sve = pd.DataFrame()
-                    st.session_state.loaded_history = False
-                st.rerun()
+        if st.button("🗑️ Obriši", type="secondary", use_container_width=True) and opcije[izabrani_fajl]:
+            os.remove(opcije[izabrani_fajl])
+            if st.session_state.loaded_history: st.session_state.df_sve = pd.DataFrame(); st.session_state.loaded_history = False
+            st.rerun()
 
     st.markdown("---")
     st.header("⚠️ Reset Sistema")
@@ -875,48 +861,40 @@ with st.sidebar:
 if st.session_state.pokrenuto or st.session_state.loaded_history:
 
     if st.session_state.pokrenuto:
-        lista_adresa = []
-        if adresa_1.strip():
-            lista_adresa.append(cirilica_u_latinicu(adresa_1.strip()))
-        if adresa_2.strip():
-            lista_adresa.append(cirilica_u_latinicu(adresa_2.strip()))
-
-        if not adresa_1.strip(): 
-            st.warning("⚠️ Unesite bar prvu adresu (Adresa 1) da biste pokrenuli skeniranje!")
-            st.session_state.pokrenuto = False
-            st.rerun()
+        lista_adresa = [cirilica_u_latinicu(a.strip()) for a in [adresa_1, adresa_2] if a.strip()]
+        if not lista_adresa: 
+            st.warning("⚠️ Unesite bar prvu adresu da biste skenirali!"); st.session_state.pokrenuto = False; st.rerun()
 
         now = time.time()
         if now - st.session_state.last_run >= sleep_interval * 60 or st.session_state.last_run == 0:
-            sl = st.empty()
-            live_ui_ph = st.empty()
-            live_state = {"Wolt": 0, "Glovo": 0}
             
-            with st.spinner('🔄 Pretražujem restorane, sačekaj...'):
+            with st.spinner('🔄 Skripta pretražuje restorane, sačekaj...'):
+                live_ui_ph = st.empty() 
+                sl = st.empty() 
+                live_state = {"Wolt": 0, "Glovo": 0}
+                
                 df, hi, pdf, err_imgs = asyncio.run(proces_skeniranja(lista_adresa, sl, live_ui_ph, live_state, generisi_pdf, email_unos))
                 
                 if not df.empty:
-                    ts = timestamp()
-                    df.to_csv(OUTPUT_DIR / f"Detaljno_{ts}.csv", index=False)
+                    df.to_csv(OUTPUT_DIR / f"Detaljno_{timestamp()}.csv", index=False)
 
-            live_ui_ph.empty()
-            st.session_state.df_sve, st.session_state.df_history, st.session_state.pdf_fajlovi, st.session_state.error_screenshots, st.session_state.last_run = df, hi, pdf, err_imgs, time.time()
-            sl.empty(); st.rerun()
+                live_ui_ph.empty()
+                st.session_state.df_sve, st.session_state.df_history, st.session_state.pdf_fajlovi, st.session_state.error_screenshots, st.session_state.last_run = df, hi, pdf, err_imgs, time.time()
+                sl.empty()
+            st.rerun()
 
     df = st.session_state.df_sve
     if not df.empty:
         for col in ["Vreme_Broj", "Vreme dostave", "Ocena", "Is_New"]:
             if col not in df.columns: df[col] = False if col == "Is_New" else (np.nan if "Broj" in col else "-")
 
-        if st.session_state.loaded_history:
-            st.info("📂 **Prikazuje se učitani istorijski izveštaj.**")
-        else:
-            st.success(f"✅ Osveženo u: {datetime.datetime.fromtimestamp(st.session_state.last_run, LOCAL_TZ).strftime('%H:%M:%S')}")
+        if st.session_state.loaded_history: st.info("📂 **Pregledate arhivirani izveštaj.**")
+        else: st.success(f"✅ Skeniranje završeno u: {datetime.datetime.fromtimestamp(st.session_state.last_run, LOCAL_TZ).strftime('%H:%M:%S')}")
         
         tab_dash, tab_lista, tab_uporedno, tab_akcije = st.tabs([
             "📊 Dashboard", "🔍 Lista Restorana", "⚖️ Uporedni Prikaz", "🎁 Akcije i Popusti"
         ])
-
+        
         adrese_un = list(df["Adresa"].unique())
         
         with tab_dash:
@@ -986,53 +964,35 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
                     ch1, ch2 = st.columns(2)
                     with ch1: st.plotly_chart(kreiraj_timeline_grafikon_ui(chart_hist, None, "Istorijat: Prosečno vreme dostave", metrika="Avg_Vreme", ylabel="Vreme (min)"), use_container_width=True)
                     with ch2: st.plotly_chart(kreiraj_timeline_grafikon_ui(chart_hist, None, "Istorijat: Broj restorana na akciji", metrika="Broj_Akcija", ylabel="Broj akcija"), use_container_width=True)
-                else:
-                    st.info("Nema istorije za odabranu adresu.")
-            else:
-                st.info("Nema istorijskih podataka.")
+                else: st.info("Nema istorije za odabranu adresu.")
+            else: st.info("Nema istorijskih podataka.")
 
         with tab_lista:
             f1, f2, f3 = st.columns(3)
             with f1: fa = st.multiselect("📍 Adresa", df["Adresa"].unique(), df["Adresa"].unique())
             with f2: fp = st.multiselect("📱 Platforma", df["Platforma"].unique(), df["Platforma"].unique())
             with f3: fs = st.multiselect("🚦 Status", ["Otvoreno", "Zatvoreno"], ["Otvoreno", "Zatvoreno"])
-            
             c_filt1, c_filt2 = st.columns(2)
             with c_filt1: filt_new = st.checkbox("✨ Prikaži samo NOVE restorane")
             with c_filt2: filt_promo = st.checkbox("🔥 Prikaži samo restorane SA AKCIJAMA")
             
             f_df = df[(df["Adresa"].isin(fa)) & (df["Platforma"].isin(fp)) & (df["Status"].isin(fs))]
-            if filt_new: 
-                f_df = f_df[f_df["Is_New"].isin([True, 'True', 'true', 1])]
-            if filt_promo: 
-                f_df = f_df[f_df["Akcija"] != "-"]
+            if filt_new: f_df = f_df[f_df["Is_New"].isin([True, 'True', 'true', 1])]
+            if filt_promo: f_df = f_df[f_df["Akcija"] != "-"]
 
             disp_df = f_df.copy()
             disp_df["Oznaka"] = disp_df["Is_New"].apply(lambda x: "✨ NOVO" if x in [True, 'True', 'true', 1] else "")
             disp_df = disp_df.drop(columns=['Naziv_Norm', 'Vreme_Broj', 'Is_New'], errors='ignore')
-            
             cols = ["Adresa", "Platforma", "Naziv", "Status", "Ocena", "Vreme dostave", "Akcija", "Oznaka", "Link"]
             disp_df = disp_df[cols]
 
             def style_rows(row):
                 styles = [''] * len(row)
-                status_idx = row.index.get_loc('Status')
-                akcija_idx = row.index.get_loc('Akcija')
-                
-                if row['Status'] == 'Otvoreno': styles[status_idx] = 'color: #27ae60; font-weight: bold;'
-                else: styles[status_idx] = 'color: #e74c3c; font-weight: bold;'
-                    
-                if row['Akcija'] != '-': styles[akcija_idx] = 'color: #8e44ad; font-weight: bold;'
+                styles[row.index.get_loc('Status')] = 'color: #27ae60; font-weight: bold;' if row['Status'] == 'Otvoreno' else 'color: #e74c3c; font-weight: bold;'
+                if row['Akcija'] != '-': styles[row.index.get_loc('Akcija')] = 'color: #8e44ad; font-weight: bold;'
                 return styles
 
-            st.dataframe(
-                disp_df.style.apply(style_rows, axis=1), 
-                use_container_width=True, hide_index=True, height=800,
-                column_config={
-                    "Link": st.column_config.LinkColumn("Link", display_text="Otvori na sajtu"),
-                    "Akcija": st.column_config.TextColumn("Akcija", width="large")
-                }
-            )
+            st.dataframe(disp_df.style.apply(style_rows, axis=1), use_container_width=True, hide_index=True, height=800, column_config={"Link": st.column_config.LinkColumn("Link", display_text="Otvori na sajtu"), "Akcija": st.column_config.TextColumn("Akcija", width="large")})
 
         with tab_uporedno:
             c_up1, c_up2 = st.columns(2)
@@ -1043,27 +1003,20 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
             uporedni_podaci = []
             for adr in adrese_un:
                 df_adr = df[df['Adresa'] == adr]
-                wolt_df = df_adr[df_adr['Platforma'] == 'Wolt']
-                glovo_df = df_adr[df_adr['Platforma'] == 'Glovo']
-                zajednicki = set(wolt_df['Naziv_Norm']).intersection(set(glovo_df['Naziv_Norm']))
+                zajednicki = set(df_adr[df_adr['Platforma'] == 'Wolt']['Naziv_Norm']).intersection(set(df_adr[df_adr['Platforma'] == 'Glovo']['Naziv_Norm']))
                 for norm_ime in zajednicki:
-                    w_row = wolt_df[wolt_df['Naziv_Norm'] == norm_ime].iloc[0]
-                    g_row = glovo_df[glovo_df['Naziv_Norm'] == norm_ime].iloc[0]
+                    w_row = df_adr[(df_adr['Platforma'] == 'Wolt') & (df_adr['Naziv_Norm'] == norm_ime)].iloc[0]
+                    g_row = df_adr[(df_adr['Platforma'] == 'Glovo') & (df_adr['Naziv_Norm'] == norm_ime)].iloc[0]
                     uporedni_podaci.append({
-                        "Adresa": adr, "Naziv (Wolt)": w_row['Naziv'], "Status Wolt": w_row['Status'], "Vreme Wolt": w_row['Vreme dostave'], "Ocena Wolt": w_row['Ocena'], "Link Wolt": w_row['Link'],
-                        "Naziv (Glovo)": g_row['Naziv'], "Status Glovo": g_row['Status'], "Vreme Glovo": g_row['Vreme dostave'], "Ocena Glovo": g_row['Ocena'], "Link Glovo": g_row['Link']
+                        "Adresa": adr, "Naziv (Wolt)": w_row['Naziv'], "Status Wolt": w_row['Status'], "Vreme Wolt": w_row['Vreme dostave'], "Link Wolt": w_row['Link'], "Naziv (Glovo)": g_row['Naziv'], "Status Glovo": g_row['Status'], "Vreme Glovo": g_row['Vreme dostave'], "Link Glovo": g_row['Link']
                     })
             
             if uporedni_podaci:
                 df_uporedni = pd.DataFrame(uporedni_podaci)
                 df_uporedni = df_uporedni[(df_uporedni['Status Wolt'].isin(filter_wolt_up)) & (df_uporedni['Status Glovo'].isin(filter_glovo_up))]
-                
-                if not df_uporedni.empty:
-                    st.dataframe(df_uporedni.style.map(lambda val: f'color: {"#27ae60" if val=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status Wolt', 'Status Glovo']), use_container_width=True, hide_index=True, height=800, column_config={"Link Wolt": st.column_config.LinkColumn("Link Wolt", display_text="Otvori Wolt"), "Link Glovo": st.column_config.LinkColumn("Link Glovo", display_text="Otvori Glovo")})
-                else:
-                    st.info("Nema restorana koji odgovaraju odabranim filterima statusa.")
-            else:
-                st.info("Nema restorana koji se nalaze na obe platforme za odabrane adrese.")
+                if not df_uporedni.empty: st.dataframe(df_uporedni.style.map(lambda val: f'color: {"#27ae60" if val=="Otvoreno" else "#e74c3c"}; font-weight: bold;', subset=['Status Wolt', 'Status Glovo']), use_container_width=True, hide_index=True, height=800, column_config={"Link Wolt": st.column_config.LinkColumn("Link Wolt", display_text="Otvori Wolt"), "Link Glovo": st.column_config.LinkColumn("Link Glovo", display_text="Otvori Glovo")})
+                else: st.info("Nema restorana za date filtere.")
+            else: st.info("Nema zajedničkih restorana na obe platforme.")
 
         with tab_akcije:
             unikatne_akcije = set()
@@ -1081,16 +1034,14 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
             pc = st.columns(4)
             for i, p in enumerate(st.session_state.pdf_fajlovi):
                 with pc[i % 4]:
-                    with open(p, "rb") as f: st.download_button(f"Preuzmi {os.path.basename(p)}", f.read(), os.path.basename(p), "application/pdf", key=f"p_{i}")
+                    with open(p, "rb") as f: st.download_button(f"Preuzmi {os.path.basename(p)}", f.read(), os.path.basename(p), "application/pdf")
                     
         if st.session_state.get('error_screenshots'):
             st.markdown("---")
-            st.subheader("📸 Zabeležene greške (Screenshots)")
-            st.warning("Prilikom poslednjeg skeniranja sistem je naišao na blokade. Pogledajte slike ekrana ispod:")
+            st.error("⚠️ PAŽNJA: Skripta je zabeležila potencijalne probleme pri skeniranju. Proveri slike ispod:")
             ec = st.columns(len(st.session_state.error_screenshots))
             for idx, img_path in enumerate(st.session_state.error_screenshots):
-                with ec[idx % len(ec)]:
-                    st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
+                with ec[idx % len(ec)]: st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
 
     if st.session_state.pokrenuto:
         if auto_refresh:
@@ -1098,11 +1049,9 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
             countdown_ph = st.sidebar.empty()
             while rem > 0:
                 countdown_ph.info(f"⏳ Sledeće automatsko skeniranje za: **{rem//60:02d}:{rem%60:02d}**")
-                time.sleep(1)
-                rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
+                time.sleep(1); rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
             st.rerun()
-        else:
-            st.sidebar.success("✅ Skeniranje završeno. Kliknite 'Pokreni' za novo skeniranje.")
+        else: st.sidebar.success("✅ Skeniranje završeno. Kliknite 'Pokreni' za novo skeniranje.")
         
 else: 
     st.info("Sistem je spreman. Unesite parametre u levi meni i kliknite 'Pokreni'.")
