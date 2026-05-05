@@ -368,30 +368,40 @@ def izvuci_vreme_dostave(tekst):
     except: pass
     return "-", np.nan
 
+# SUPER PRECIZNA FUNKCIJA ZA POPUSTE (Preuzeta sa ranijeg taska)
 def izvuci_akciju(tekst, html, plat):
-    cist = str(tekst) + " \n " + re.sub(r'<[^>]+>', ' \n ', str(html))
-    akcije, seen, res = [], set(), []
-    for line in [l.strip().lower() for l in cist.split('\n') if l.strip()]:
-        if len(line) > 80: continue 
-        if any(x in line for x in ["besplatna dostava", "free delivery", "dostava 0", "delivery 0"]): akcije.append("Besplatna dostava")
-        elif "1+1" in line or "buy 1 get 1" in line: akcije.append("1+1 Gratis")
-        elif "%" in line and re.search(r'\d', line):
-            if plat == "Glovo" and re.fullmatch(r'\d{1,3}\s*%', line): continue
-            akcije.append(line)
-        elif any(x in line for x in ["rsd", "din"]) and any(x in line for x in ["-", "off", "discount", "popust", "save", "spend"]): akcije.append(line)
+    cist = (str(tekst) + " \n " + str(html)).lower()
+    cist_tekst = re.sub(r'<[^>]+>', ' ', cist)
+    cist_brojevi = cist_tekst.replace(',', '').replace('.', '')
     
-    sve_low = (str(tekst) + " " + str(html)).lower()
-    if not akcije:
-        akcije.extend([p.strip() for p in re.findall(r'(-\s*\d{1,2}\s*%|\b\d{1,2}\s*%\s*popust|\b\d{1,2}\s*%\s*off|\b\d{1,2}\s*%\s*discount)', sve_low)])
-    if "wolt+" in sve_low: akcije.append("Wolt+")
-    if "prime" in sve_low: akcije.append("Prime")
+    akcije, seen, res = [], set(), []
+    
+    if any(x in cist_tekst for x in ["besplatna dostava", "free delivery", "dostava 0", "0 rsd dostava", "delivery 0"]):
+        akcije.append("Besplatna dostava")
+        
+    if any(x in cist_tekst for x in ["1+1", "1 + 1", "buy 1 get 1"]):
+        akcije.append("1+1 Gratis")
+        
+    if plat == "Wolt":
+        for pm in re.findall(r'(\d{1,2}\s*%)', cist_tekst):
+            akcije.append(f"{pm.strip()} popusta")
+    else:
+        for pm in re.findall(r'(\d{1,2}\s*%)\s*(?:popust|off|discount|-)', cist_tekst):
+            akcije.append(f"{pm.strip()} popusta")
+            
+    if any(x in cist_tekst for x in ["popust", "off", "uštedi", "save", "discount"]):
+        for rm in re.findall(r'(\d{2,5})\s*(?:rsd|din)', cist_brojevi):
+            if int(rm) > 10: akcije.append(f"{rm} RSD popusta")
+            
+    if "wolt+" in cist_tekst: akcije.append("Wolt+")
+    if "prime" in cist_tekst: akcije.append("Prime")
         
     for a in akcije:
-        ac = re.sub(r'<[^>]+>', '', a).strip()
-        if not ac: continue
-        if "besplatna" in ac.lower() or "free" in ac.lower(): ac = "Besplatna dostava"
-        elif ac not in ["Wolt+", "Prime"]: ac = ac[0].upper() + ac[1:].replace("rsd", "RSD").replace("din", "DIN")
-        if ac not in seen: seen.add(ac); res.append(f"• {ac}")
+        ac = a[0].upper() + a[1:]
+        if ac not in seen:
+            seen.add(ac)
+            res.append(f"• {ac}")
+            
     return "\n".join(res) if res else "-"
 
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', str(ime).lower())
@@ -415,11 +425,12 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, li
         if plat == "Wolt":
             podaci = await page.evaluate('''() => {
                 let rez = [];
-                // Hvatamo i klasične kartice i nove "Carousel" (Shopping) kartice
+                // Hvatamo sve kartice, ali ciljamo njihov NAJŠIRI OMOTAČ (li) da bismo pokupili i bedževe sa popustima koji lebde
                 document.querySelectorAll("a[data-test-id^='venueCard.'], a[data-test-id^='VenueWindowShoppingCarousel']").forEach(c => {
                     let link = c.href; 
-                    let text = c.innerText; 
-                    let html = c.innerHTML; 
+                    let container = c.closest('li') || c.parentElement || c;
+                    let text = container.innerText; 
+                    let html = container.innerHTML; 
                     if (link && text && text.trim().length > 0) {
                         rez.push({link, text, html});
                     }
@@ -589,9 +600,7 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
                 f.write(html_sadrzaj)
             if error_screenshots is not None:
                 error_screenshots.append(debug_html_path)
-            log_msg(f"[SISTEM] Generisan debug HTML fajl za rutu: {address}", log_ph)
-        except Exception as debug_err:
-            log_msg(f"[GREŠKA PRI ČUVANJU HTML-a] {debug_err}", log_ph)
+        except: pass
         # =========================================================
                 
         rez = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", address, log_ph, live_ph, live_state)
@@ -628,6 +637,17 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
         
         await page.goto("https://glovoapp.com/sr/rs", wait_until="domcontentloaded")
         
+        # --- AGRESIVNO GAŠENJE KOLAČIĆA ---
+        # Sklanja "Accept All" pop-up koji blokira unos adrese
+        try:
+            accept_btn = page.locator("button", has_text=re.compile(r"Accept All|Prihvati sve", re.IGNORECASE)).first
+            await accept_btn.wait_for(state="visible", timeout=3000)
+            await accept_btn.click()
+            await asyncio.sleep(1)
+        except:
+            pass
+        # ---------------------------------
+        
         stranica_tekst = await page.content()
         if "Oh, no!" in stranica_tekst or "It looks like there's a problem" in stranica_tekst:
             log_msg(f"[GLOVO BLOKADA] {address}.", log_ph)
@@ -638,9 +658,6 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
                     error_screenshots.append(err_path)
                 except: pass
             return []
-        
-        try: await page.get_by_role("button", name=re.compile("Accept|Prihvati", re.I)).click(timeout=3000)
-        except: pass
         
         try:
             hero_input = page.locator("#hero-container-input")
