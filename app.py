@@ -16,8 +16,6 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 import time
 import streamlit as st
 import sys
-import requests
-import urllib.parse
 
 # PODEŠAVANJE LOKALNOG VREMENA
 try:
@@ -482,7 +480,7 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, li
         
     return list(results_dict.values())
 
-# ---------------- WOLT API MOD (BEZ SKROLOVANJA) ----------------
+# ---------------- WOLT MREŽNO PRESRETANJE (BEZ BLOKADA) ----------------
 async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None):
     page = None
     results_dict = {}
@@ -497,103 +495,12 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page.set_default_timeout(10000)
         
-        # ================= API INTERCEPTOR =================
-        api_info = {"lat": None, "lon": None, "cookies": ""}
-        
-        async def intercept_wolt(request):
-            url = request.url
-            if "consumer-api.wolt.com" in url and "lat=" in url and "lon=" in url:
-                try:
-                    parsed = urllib.parse.urlparse(url)
-                    qs = urllib.parse.parse_qs(parsed.query)
-                    if 'lat' in qs and 'lon' in qs:
-                        api_info['lat'] = qs['lat'][0]
-                        api_info['lon'] = qs['lon'][0]
-                except: pass
-
-        page.on("request", intercept_wolt)
-        
-        await page.goto("https://wolt.com/sr/srb")
-        
-        try: await page.locator("[data-test-id='allow-button']").click(timeout=3000)
-        except: pass
-        
-        try:
-            input_f = page.get_by_role("combobox").first
-            await input_f.wait_for(state="visible", timeout=4000)
-            await input_f.click(timeout=3000)
-            await input_f.fill(address)
-            
-            await asyncio.sleep(3)
-            await page.keyboard.press("ArrowDown")
-            await asyncio.sleep(0.5)
-            await page.keyboard.press("Enter")
-            
-            for _ in range(15):
-                if api_info["lat"] and api_info["lon"]: break
-                await asyncio.sleep(1)
-                
-        except PlaywrightTimeoutError:
-            log_msg(f"[WOLT] VIP mod. Menjam adresu u header-u za: {address}", log_ph)
+        # OVO JE TAJNA: Lovimo svaki JSON API odgovor dok Playwright skroluje!
+        async def intercept_wolt(response):
             try:
-                header_btn = page.locator("[data-test-id='header.address-select-button']")
-                if not await header_btn.is_visible():
-                    header_btn = page.locator("header [role='button']").first
-                    
-                await header_btn.wait_for(state="visible", timeout=5000)
-                await header_btn.click()
-                await asyncio.sleep(1)
-
-                search_modal = page.locator("[data-test-id='address-picker-input']")
-                if not await search_modal.is_visible():
-                    search_modal = page.get_by_role("combobox").last
-                    
-                await search_modal.wait_for(state="visible", timeout=5000)
-                await search_modal.click()
-                await search_modal.fill(address)
-
-                await asyncio.sleep(3)
-                await page.keyboard.press("ArrowDown")
-                await asyncio.sleep(0.5)
-                await page.keyboard.press("Enter")
-                
-                for _ in range(15):
-                    if api_info["lat"] and api_info["lon"]: break
-                    await asyncio.sleep(1)
-                    
-            except PlaywrightTimeoutError:
-                log_msg(f"[WOLT ODUSTAJEM] Ne mogu da nadjem polje za promenu adrese.", log_ph)
-                return []
-
-        cookies = await context_wolt.cookies()
-        api_info["cookies"] = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
-        
-        await page.close()
-        page = None
-        
-        # ================= PURE API REQUESTS =================
-        if api_info["lat"] and api_info["lon"]:
-            lat = api_info["lat"]
-            lon = api_info["lon"]
-            log_msg(f"[WOLT API] Locirano (Lat: {lat}, Lon: {lon}). Čupam podatke sa novog API-ja...", log_ph)
-            
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Cookie": api_info["cookies"],
-                "Accept": "application/json"
-            }
-            
-            # --- UBAČEN TVOJ NOVI API ENDPOINT ---
-            api_url = f"https://consumer-api.wolt.com/v1/pages/category/restaurants?lat={lat}&lon={lon}"
-            
-            while api_url:
-                try:
-                    r = requests.get(api_url, headers=headers, timeout=15)
-                    
-                    if r.status_code != 200:
-                        break
-                        
-                    data = r.json()
+                # Filtriramo samo API odgovore koji sadrže podatke o restoranima
+                if "consumer-api.wolt.com" in response.url and ("pages/" in response.url or "discovery" in response.url):
+                    data = await response.json()
                     
                     svi_itemi = []
                     if "sections" in data:
@@ -667,33 +574,93 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
                     if live_ph and live_state is not None:
                         live_state["Wolt"] = trenutni
                         osvezi_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address)
-                        
-                    next_cursor = data.get("next")
-                    if next_cursor:
-                        if isinstance(next_cursor, str):
-                            api_url = next_cursor if next_cursor.startswith("http") else f"https://consumer-api.wolt.com{next_cursor}"
-                        elif isinstance(next_cursor, dict) and "$oid" in next_cursor:
-                            base = api_url.split("&cursor=")[0]
-                            api_url = f"{base}&cursor={next_cursor['$oid']}"
-                        elif isinstance(next_cursor, dict) and "cursor" in next_cursor:
-                            base = api_url.split("&cursor=")[0]
-                            api_url = f"{base}&cursor={next_cursor['cursor']}"
-                        else:
-                            api_url = None
-                    else:
-                        api_url = None
-                        
-                except Exception as e:
-                    log_msg(f"[WOLT API Greška] {e}", log_ph)
-                    break
+            except:
+                pass
+
+        # Vežemo našu tajnu funkciju za svaki odgovor koji browser primi
+        page.on("response", intercept_wolt)
+        
+        await page.goto("https://wolt.com/sr/srb")
+        
+        try: await page.locator("[data-test-id='allow-button']").click(timeout=3000)
+        except: pass
+        
+        try:
+            input_f = page.get_by_role("combobox").first
+            await input_f.wait_for(state="visible", timeout=4000)
+            await input_f.click(timeout=3000)
+            await input_f.fill(address)
+            
+            await asyncio.sleep(3)
+            await page.keyboard.press("ArrowDown")
+            await asyncio.sleep(0.5)
+            await page.keyboard.press("Enter")
+            
+            # Čekamo da nas prebaci i učita Restorane
+            try:
+                btn_restorani = page.locator("[data-test-id='tile-restaurants']").first
+                await btn_restorani.wait_for(state="visible", timeout=10000)
+                await btn_restorani.click()
+                await asyncio.sleep(4)
+            except PlaywrightTimeoutError:
+                pass
+            
+        except PlaywrightTimeoutError:
+            log_msg(f"[WOLT] VIP mod. Menjam adresu u header-u za: {address}", log_ph)
+            try:
+                header_btn = page.locator("[data-test-id='header.address-select-button']")
+                if not await header_btn.is_visible():
+                    header_btn = page.locator("header [role='button']").first
                     
-            log_msg(f"[WOLT API] Skeniranje završeno blickrigom! Uhvaćeno {len(results_dict)} restorana.", log_ph)
-            return list(results_dict.values())
+                await header_btn.wait_for(state="visible", timeout=5000)
+                await header_btn.click()
+                await asyncio.sleep(1)
+
+                search_modal = page.locator("[data-test-id='address-picker-input']")
+                if not await search_modal.is_visible():
+                    search_modal = page.get_by_role("combobox").last
+                    
+                await search_modal.wait_for(state="visible", timeout=5000)
+                await search_modal.click()
+                await search_modal.fill(address)
+
+                await asyncio.sleep(3)
+                await page.keyboard.press("ArrowDown")
+                await asyncio.sleep(0.5)
+                await page.keyboard.press("Enter")
+                
+                try:
+                    btn_restorani = page.locator("[data-test-id='tile-restaurants']").first
+                    await btn_restorani.wait_for(state="visible", timeout=10000)
+                    await btn_restorani.click()
+                    await asyncio.sleep(4)
+                except PlaywrightTimeoutError:
+                    pass
+                
+            except PlaywrightTimeoutError:
+                log_msg(f"[WOLT ODUSTAJEM] Ne mogu da nadjem polje za promenu adrese.", log_ph)
+                return []
+                
+        # SADA SAMO SKROLUJEMO (Naš API hvatač u pozadini radi ceo posao!)
+        pokusaji_na_dnu = 0
+        for _ in range(40): # Skrolujemo do 40 puta
+            await page.evaluate("window.scrollBy(0, 800);")
+            await asyncio.sleep(1.5) # Dajemo mu vremena da API vrati podatke
             
-        else:
-            log_msg("[WOLT UPOZORENJE] Nisam uspeo da uhvatim lat/lon iz pozadine. Vraćam 0.", log_ph)
-            return []
+            h = await page.evaluate("document.body.scrollHeight")
+            s = await page.evaluate("window.scrollY + window.innerHeight")
             
+            if s >= h - 100:
+                pokusaji_na_dnu += 1
+                await asyncio.sleep(2)
+                if pokusaji_na_dnu >= 3: 
+                    break 
+            else:
+                pokusaji_na_dnu = 0
+                
+        log_msg(f"[WOLT ZAVRŠENO] Uhvaćeno {len(results_dict)} restorana u potpunosti iz API-ja!", log_ph)
+        return list(results_dict.values())
+
     except Exception as e: 
         log_msg(f"[WOLT GREŠKA] {e}", log_ph)
         if page and error_screenshots is not None:
@@ -704,7 +671,7 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
             except: pass
         return []
     finally:
-        if page and not page.is_closed(): await page.close()
+        if page: await page.close()
 
 async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None):
     page = None
@@ -871,7 +838,7 @@ async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=Fa
             sve.extend(r_glovo)
             await context_glovo.close() 
             
-            log_msg("🚲 Preuzimam WOLT sa API-ja...", log_ph)
+            log_msg("🚲 Skrolujem WOLT...", log_ph)
             context_wolt = await browser.new_context(**wa)
             await context_wolt.route("**/*", pametni_dijetalni_mod)
             r_wolt = await scrape_wolt(context_wolt, adr, log_ph, live_ph, live_state, error_screenshots)
