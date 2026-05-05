@@ -10,7 +10,6 @@ import matplotlib.pyplot as plt
 import plotly.express as px          
 import plotly.graph_objects as go    
 import random
-import urllib.parse
 from io import BytesIO
 from pathlib import Path
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
@@ -322,13 +321,8 @@ def extract_delivery_time(text):
     except: pass
     return "-", np.nan
 
-
 # ================= FUNKCIJA ZA REKURZIVNO ČUPANJE JSON TEKSTOVA =================
 def get_all_json_strings(obj):
-    """
-    Prolazi kroz ceo JSON rekurzivno i skuplja sve tekstualne vrednosti na jedno mesto.
-    Ovo garantuje da nam neće promaći "10% discount..." ma gde da ga Wolt API sakrije.
-    """
     if isinstance(obj, dict):
         return " ".join(get_all_json_strings(v) for v in obj.values() if v is not None)
     elif isinstance(obj, list):
@@ -337,8 +331,6 @@ def get_all_json_strings(obj):
         return obj
     return ""
 
-
-# SUPER PRECISE PROMO FUNCTION WITH GLOVO FIX
 def extract_promo(text, html_content, plat):
     clean = (str(text) + " \n " + str(html_content)).lower()
     clean_text = re.sub(r'<[^>]+>', ' ', clean)
@@ -358,7 +350,7 @@ def extract_promo(text, html_content, plat):
         promos.append("1+1 Free")
         
     if plat == "Wolt":
-        for pm in re.findall(r'(\d{1,3}\s*%)', clean_text):  # Povećano da hvata i "100%"
+        for pm in re.findall(r'(\d{1,3}\s*%)', clean_text):
             promos.append(f"{pm.strip()} discount")
     else:
         for pm in re.findall(r'(\d{1,2}\s*%)\s*(?:popust|off|discount|-)', clean_text):
@@ -390,21 +382,36 @@ async def smart_diet_mode(route):
     else:
         await route.continue_()
 
-# ---------------- SMART SCROLLING (FOR GLOVO ONLY) ----------------
+# ---------------- SMART SCROLLING (ZA OBA SAJTA) ----------------
 async def smart_scroll_and_extract(page, plat, address, log_ph=None, live_ph=None, live_state=None):
     results_dict = {}
     prev_count = 0
     attempts_at_bottom = 0
     
     while True:
-        data = await page.evaluate('''() => {
-            let rez = [];
-            document.querySelectorAll("a:has(h3), a[data-testid='store-card'], .store-card a").forEach(c => {
-                let link = c.href;
-                if (!link.includes('/dostava') && !link.includes('/category')) { rez.push({link: link, text: c.innerText, html: c.innerHTML}); }
-            });
-            return rez;
-        }''')
+        if plat == "Wolt":
+            data = await page.evaluate('''() => {
+                let rez = [];
+                document.querySelectorAll("a[data-test-id^='venueCard.'], a[data-test-id^='VenueWindowShoppingCarousel']").forEach(c => {
+                    let link = c.href; 
+                    let container = c.closest('li') || c.parentElement || c;
+                    let text = container.innerText; 
+                    let html = container.innerHTML; 
+                    if (link && text && text.trim().length > 0) {
+                        rez.push({link, text, html});
+                    }
+                });
+                return rez;
+            }''')
+        else:
+            data = await page.evaluate('''() => {
+                let rez = [];
+                document.querySelectorAll("a:has(h3), a[data-testid='store-card'], .store-card a").forEach(c => {
+                    let link = c.href;
+                    if (!link.includes('/dostava') && !link.includes('/category')) { rez.push({link: link, text: c.innerText, html: c.innerHTML}); }
+                });
+                return rez;
+            }''')
 
         for item in data:
             link = item['link']
@@ -423,7 +430,10 @@ async def smart_scroll_and_extract(page, plat, address, log_ph=None, live_ph=Non
             
             is_new = False
             t_low = text.strip().lower()
-            is_new = t_low.endswith('new') or t_low.endswith('novo') or bool(re.search(r'•.*?new\b', t_low)) or (rating == "Novo" or rating == "New")
+            if plat == "Wolt":
+                is_new = bool(re.search(r'>\s*(novo|new)\s*<', html_content.lower())) or (rating == "Novo" or rating == "New")
+            else:
+                is_new = t_low.endswith('new') or t_low.endswith('novo') or bool(re.search(r'•.*?new\b', t_low)) or (rating == "Novo" or rating == "New")
 
             results_dict[link] = {
                 "Address": address, "Platform": plat, "Name": name, "Rating": rating,
@@ -460,104 +470,170 @@ async def smart_scroll_and_extract(page, plat, address, log_ph=None, live_ph=Non
 
 # ---------------- SCRAPERS ----------------
 
-# PURE API SCRAPER ZA WOLT
-async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None, debug_mode=False):
-    results_dict = {}
+async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None, debug_mode=False):
+    page = None
+    api_promos_dict = {}
+
+    # Osluškivač mreže - Presrećemo Wolt API odgovore DOK skripta skroluje po UI
+    async def handle_response(response):
+        if "restaurant-api.wolt.com/v1/pages" in response.url and response.request.method == "GET":
+            try:
+                json_data = await response.json()
+                for section in json_data.get("sections", []):
+                    for item in section.get("items", []):
+                        venue = item.get("venue")
+                        if venue and venue.get("slug"):
+                            slug = venue.get("slug")
+                            link = f"https://wolt.com/sr/srb/restaurant/{slug}"
+                            
+                            all_strings = get_all_json_strings(item).lower()
+                            promo_found = extract_promo(all_strings, "", "Wolt")
+                            
+                            if link not in api_promos_dict:
+                                api_promos_dict[link] = set()
+                                
+                            if promo_found != "-":
+                                for p in promo_found.split('\n'):
+                                    if p.strip():
+                                        api_promos_dict[link].add(p.strip())
+            except: pass
+
     try:
-        req = context_wolt.request
+        page = await context_wolt.new_page()
+        # Aktivacija API presretača pre otvaranja stranice
+        page.on("response", handle_response)
         
-        log_msg(f"[WOLT] Geocoding address: {address}...", log_ph)
-        # Pokušavamo naći lokaciju
-        geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(address + ', Serbia')}&format=json&limit=1"
-        geo_resp = await req.get(geo_url, headers={"User-Agent": "WoltDeliveryScanner/1.0"})
-        geo_data = await geo_resp.json()
+        if debug_mode:
+            try:
+                v_path = await page.video.path()
+                if v_path: error_screenshots.append(v_path)
+            except: pass
         
-        if not geo_data:
-            geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(address)}&format=json&limit=1"
-            geo_resp = await req.get(geo_url, headers={"User-Agent": "WoltDeliveryScanner/1.0"})
-            geo_data = await geo_resp.json()
+        await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        page.set_default_timeout(10000)
+        
+        await page.goto("https://wolt.com/sr/srb")
+        
+        try: await page.locator("[data-test-id='allow-button']").click(timeout=3000)
+        except: pass
+        
+        try:
+            input_f = page.get_by_role("combobox").first
+            await input_f.wait_for(state="visible", timeout=4000)
+            await input_f.click(timeout=3000)
+            await input_f.fill(address)
             
-        if not geo_data:
-            log_msg(f"[WOLT ERROR] Could not find coordinates for: {address}", log_ph)
-            return []
+            await asyncio.sleep(3)
+            await page.keyboard.press("ArrowDown")
+            await asyncio.sleep(0.5)
+            await page.keyboard.press("Enter")
             
-        lat = geo_data[0]["lat"]
-        lon = geo_data[0]["lon"]
-        log_msg(f"[WOLT] Coordinates found: {lat}, {lon}. Fetching API...", log_ph)
-        
-        # Pucamo na DVA endpointa da bismo uhvatili sve popuste (ponekad su razbacani)
-        urls_to_check = [
-            f"https://restaurant-api.wolt.com/v1/pages/delivery?lat={lat}&lon={lon}",
-            f"https://restaurant-api.wolt.com/v1/pages/restaurants?lat={lat}&lon={lon}"
-        ]
-        
-        for api_url in urls_to_check:
-            wolt_resp = await req.get(api_url)
-            wolt_data = await wolt_resp.json()
+            try:
+                btn_restaurants = page.locator("[data-test-id='tile-restaurants']").first
+                await btn_restaurants.wait_for(state="visible", timeout=10000)
+                await btn_restaurants.click()
+                await asyncio.sleep(4)
+            except PlaywrightTimeoutError: pass
             
-            sections = wolt_data.get("sections", [])
-            for section in sections:
-                for item in section.get("items", []):
-                    venue = item.get("venue")
-                    if not venue: continue
-                    
-                    name = venue.get("name")
-                    if not name: continue
-                    
-                    slug = venue.get("slug")
-                    link = f"https://wolt.com/sr/srb/restaurant/{slug}"
-                    
-                    # API JSON čupanje (svi tekstovi unutar itema pretvoreni u jedan dugačak string za pretragu)
-                    all_text_values = get_all_json_strings(item).lower()
-                    
-                    promo_str = extract_promo(all_text_values, "", "Wolt")
-                    is_new = "new" in all_text_values or "novo" in all_text_values or "new!" in all_text_values
-                    
-                    if link in results_dict: 
-                        # Ako smo već našli ovaj restoran na drugom linku, ažuriramo popust ako ga tamo nije bilo
-                        if results_dict[link]["Promo"] == "-" and promo_str != "-":
-                            results_dict[link]["Promo"] = promo_str
-                        continue
-                    
-                    status = "Open" if venue.get("online") else "Closed"
-                    
-                    rating_score = venue.get("rating", {}).get("score")
-                    rating = str(rating_score) if rating_score else "-"
-                    
-                    est_range = venue.get("estimate_range")
-                    est_minutes = venue.get("estimate")
-                    
-                    time_num = np.nan
-                    time_str = "-"
-                    if est_range:
-                        time_str = f"{est_range} min"
-                        try:
-                            parts = str(est_range).split('-')
-                            time_num = (int(parts[0]) + int(parts[1])) / 2.0
-                        except: pass
-                    elif est_minutes:
-                        time_str = f"{est_minutes} min"
-                        time_num = float(est_minutes)
-                        
-                    results_dict[link] = {
-                        "Address": address, "Platform": "Wolt", "Name": remove_accents(name), "Rating": rating,
-                        "Delivery Time": time_str, "Promo": promo_str, "Status": status,
-                        "Time_Num": time_num, "Is_New": is_new, "Link": link
-                    }
-                    
-        log_msg(f"[WOLT - {address}] API Loaded {len(results_dict)} restaurants.", log_ph)
-        if live_ph and live_state is not None:
-            live_state["Wolt"] = len(results_dict)
-            refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address)
+            try: 
+                await page.wait_for_selector("a[data-test-id^='venueCard.'], a[data-test-id^='VenueWindowShoppingCarousel']", timeout=15000)
+            except PlaywrightTimeoutError: pass
             
-        return list(results_dict.values())
+        except PlaywrightTimeoutError:
+            log_msg(f"[WOLT] Changing address in header to: {address}", log_ph)
+            try:
+                header_btn = page.locator("[data-test-id='header.address-select-button']")
+                if not await header_btn.is_visible():
+                    header_btn = page.locator("header [role='button']").first
+                    
+                await header_btn.wait_for(state="visible", timeout=5000)
+                await header_btn.click()
+                await asyncio.sleep(1)
+
+                search_modal = page.locator("[data-test-id='address-picker-input']")
+                if not await search_modal.is_visible():
+                    search_modal = page.get_by_role("combobox").last
+                    
+                await search_modal.wait_for(state="visible", timeout=5000)
+                await search_modal.click()
+                await search_modal.fill(address)
+
+                await asyncio.sleep(3)
+                await page.keyboard.press("ArrowDown")
+                await asyncio.sleep(0.5)
+                await page.keyboard.press("Enter")
+                
+                try:
+                    btn_restaurants = page.locator("[data-test-id='tile-restaurants']").first
+                    await btn_restaurants.wait_for(state="visible", timeout=10000)
+                    await btn_restaurants.click()
+                    await asyncio.sleep(4)
+                except PlaywrightTimeoutError: pass
+                
+                try: 
+                    await page.wait_for_selector("a[data-test-id^='venueCard.'], a[data-test-id^='VenueWindowShoppingCarousel']", timeout=15000)
+                except PlaywrightTimeoutError: pass
+                
+            except PlaywrightTimeoutError:
+                log_msg(f"[WOLT ABORT] Cannot find address field.", log_ph)
+                if page and error_screenshots is not None and debug_mode:
+                    try:
+                        err_path = str(ERRORS_DIR / f"Wolt_Timeout_{remove_accents(address).replace(' ', '_')}_{timestamp()}.png")
+                        await page.screenshot(path=err_path)
+                        error_screenshots.append(err_path)
+                    except: pass
+                return []
+
+        if debug_mode:
+            try:
+                html_content = await page.content()
+                debug_html_path = str(ERRORS_DIR / f"Wolt_Debug_{remove_accents(address).replace(' ', '_')}_{timestamp()}.html")
+                with open(debug_html_path, "w", encoding="utf-8") as f:
+                    f.write(html_content)
+                if error_screenshots is not None:
+                    error_screenshots.append(debug_html_path)
+            except: pass
+                
+        # ORIGINALNO VIZUELNO SKENIRANJE KOJE PRONALAZI RESTORANE
+        rez = await smart_scroll_and_extract(page, "Wolt", address, log_ph, live_ph, live_state)
         
-    except Exception as e:
-        log_msg(f"[WOLT API ERROR] {e}", log_ph)
+        # SPAJANJE PODATAKA: Dodajemo akcije presretnute preko API-ja na postojeće rezultate
+        for r in rez:
+            link = r.get("Link", "")
+            if link in api_promos_dict and api_promos_dict[link]:
+                current_promo = r.get("Promo", "-")
+                final_promos = set()
+                
+                if current_promo != "-":
+                    for p in current_promo.split('\n'):
+                        if p.strip(): final_promos.add(p.strip())
+                
+                final_promos.update(api_promos_dict[link])
+                r["Promo"] = "\n".join(sorted(list(final_promos)))
+        
+        if len(rez) < 5 and debug_mode:
+            if error_screenshots is not None:
+                err_path = str(ERRORS_DIR / f"Wolt_Warning_{remove_accents(address).replace(' ', '_')}_{timestamp()}.png")
+                try:
+                    await page.screenshot(path=err_path)
+                    error_screenshots.append(err_path)
+                except: pass
+
+        return rez
+
+    except Exception as e: 
+        log_msg(f"[WOLT ERROR] {e}", log_ph)
+        if page and error_screenshots is not None and debug_mode:
+            try:
+                err_path = str(ERRORS_DIR / f"Wolt_Error_{remove_accents(address).replace(' ', '_')}_{timestamp()}.png")
+                await page.screenshot(path=err_path)
+                error_screenshots.append(err_path)
+            except: pass
         return []
+    finally:
+        if page: await page.close()
 
 
-# ORIGINAL GLOVO LOGIC
 async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None, debug_mode=False):
     page = None
     try:
@@ -624,6 +700,7 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
                     except: pass
                 return []
 
+        # EXACT LOGIC FROM APP(4).PY
         try:
             btn_drugo = page.locator("button:has-text('Drugo')")
             await btn_drugo.wait_for(state="visible", timeout=3000)
@@ -699,15 +776,17 @@ async def scan_process(addresses, log_ph, live_ph, live_state, generate_pdf=Fals
         if os.path.exists(WOLT_AUTH_FILE):
             wa["storage_state"] = WOLT_AUTH_FILE
             
-        # RESTORED ACCEPT-LANGUAGE FROM APP(4).PY TO FIX GLOVO BUTTON CLICKS
         ga = {
             "permissions": ['geolocation'],
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "extra_http_headers": {"Accept-Language": "en-US,en;q=0.9,sr;q=0.8"}
         }
+        
         if debug_mode:
             ga["record_video_dir"] = str(ERRORS_DIR)
             ga["record_video_size"] = {"width": 1280, "height": 720}
+            wa["record_video_dir"] = str(ERRORS_DIR)
+            wa["record_video_size"] = {"width": 1280, "height": 720}
 
         if os.path.exists(GLOVO_AUTH_FILE):
             log_msg("🔐 GLOVO: Loaded VIP pass.", log_ph)
@@ -731,9 +810,10 @@ async def scan_process(addresses, log_ph, live_ph, live_state, generate_pdf=Fals
             all_data.extend(r_glovo)
             await context_glovo.close() 
             
-            log_msg("🚲 Calling WOLT API...", log_ph)
+            log_msg("🚲 Scrolling WOLT...", log_ph)
             context_wolt = await browser.new_context(**wa)
-            r_wolt = await scrape_wolt_api(context_wolt, adr, log_ph, live_ph, live_state, error_screenshots, debug_mode)
+            await context_wolt.route("**/*", smart_diet_mode)
+            r_wolt = await scrape_wolt(context_wolt, adr, log_ph, live_ph, live_state, error_screenshots, debug_mode)
             all_data.extend(r_wolt)
             await context_wolt.close() 
                 
