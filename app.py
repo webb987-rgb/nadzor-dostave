@@ -17,6 +17,7 @@ import time
 import streamlit as st
 import sys
 import requests
+import urllib.parse
 
 # PODEŠAVANJE LOKALNOG VREMENA
 try:
@@ -497,14 +498,12 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
         page.set_default_timeout(10000)
         
         # ================= API INTERCEPTOR =================
-        # Hvata tacne koordinate dok Playwright unosi adresu
         api_info = {"lat": None, "lon": None, "cookies": ""}
         
         async def intercept_wolt(request):
             url = request.url
             if "consumer-api.wolt.com" in url and "lat=" in url and "lon=" in url:
                 try:
-                    import urllib.parse
                     parsed = urllib.parse.urlparse(url)
                     qs = urllib.parse.parse_qs(parsed.query)
                     if 'lat' in qs and 'lon' in qs:
@@ -519,7 +518,6 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
         try: await page.locator("[data-test-id='allow-button']").click(timeout=3000)
         except: pass
         
-        # UI logika: Unosimo adresu samo da bi Wolt opalio background API poziv
         try:
             input_f = page.get_by_role("combobox").first
             await input_f.wait_for(state="visible", timeout=4000)
@@ -531,7 +529,6 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
             await asyncio.sleep(0.5)
             await page.keyboard.press("Enter")
             
-            # Cekamo da interceptor uhvati lat/lon (max 15 sek)
             for _ in range(15):
                 if api_info["lat"] and api_info["lon"]: break
                 await asyncio.sleep(1)
@@ -568,18 +565,17 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
                 log_msg(f"[WOLT ODUSTAJEM] Ne mogu da nadjem polje za promenu adrese.", log_ph)
                 return []
 
-        # Uzimamo kolačiće za autorizaciju i ODMAH GASIMO Playwright
         cookies = await context_wolt.cookies()
         api_info["cookies"] = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
         
         await page.close()
         page = None
         
-        # ================= PURE API REQUESTS (BEZ SKROLOVANJA) =================
+        # ================= PURE API REQUESTS =================
         if api_info["lat"] and api_info["lon"]:
             lat = api_info["lat"]
             lon = api_info["lon"]
-            log_msg(f"[WOLT API] Locirano (Lat: {lat}, Lon: {lon}). Čupam podatke sa API-ja...", log_ph)
+            log_msg(f"[WOLT API] Locirano (Lat: {lat}, Lon: {lon}). Čupam podatke sa novog API-ja...", log_ph)
             
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -587,82 +583,86 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
                 "Accept": "application/json"
             }
             
-            api_url = f"https://consumer-api.wolt.com/consumer-api/discovery/v1/pages/restaurants?lat={lat}&lon={lon}"
+            # --- UBAČEN TVOJ NOVI API ENDPOINT ---
+            api_url = f"https://consumer-api.wolt.com/v1/pages/category/restaurants?lat={lat}&lon={lon}"
             
             while api_url:
                 try:
                     r = requests.get(api_url, headers=headers, timeout=15)
                     
                     if r.status_code != 200:
-                        if "restaurants" in api_url:
-                            api_url = api_url.replace("pages/restaurants", "pages/delivery")
-                            continue
                         break
                         
                     data = r.json()
                     
-                    for sec in data.get("sections", []):
-                        for item in sec.get("items", []):
-                            venue = item.get("venue")
-                            if not venue: continue
+                    svi_itemi = []
+                    if "sections" in data:
+                        for sec in data["sections"]:
+                            svi_itemi.extend(sec.get("items", []))
+                    if "items" in data:
+                        svi_itemi.extend(data["items"])
+                        
+                    for item in svi_itemi:
+                        venue = item.get("venue")
+                        if not venue: continue
+                        
+                        name = venue.get("name", "")
+                        ime = ukloni_kvacice(name)
+                        if len(ime) < 2: continue
+                        
+                        slug = venue.get("slug", "")
+                        link = f"https://wolt.com/sr/srb/restoran/{slug}" if slug else item.get("link", {}).get("target", "")
+                        if not link or link in results_dict: continue
+                        
+                        status = "Otvoreno" if venue.get("online", False) else "Zatvoreno"
+                        
+                        rating_dict = venue.get("rating", {})
+                        ocena = str(rating_dict.get("score", "-")) if rating_dict and "score" in rating_dict else "-"
+                        
+                        est = venue.get("estimate_range", "")
+                        vreme_str = f"{est} min" if est else "-"
+                        vreme_num = np.nan
+                        if est and "-" in str(est):
+                            parts = str(est).split("-")
+                            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                                vreme_num = (int(parts[0]) + int(parts[1])) / 2.0
+                        elif est and str(est).isdigit():
+                            vreme_num = float(est)
                             
-                            name = venue.get("name", "")
-                            ime = ukloni_kvacice(name)
-                            if len(ime) < 2: continue
+                        is_new = False
+                        akcije = []
+                        
+                        for b in venue.get("badges", []):
+                            t = b.get("text", "")
+                            if not t: continue
+                            if "novo" in t.lower() or "new" in t.lower(): is_new = True
+                            else: akcije.append(t)
                             
-                            slug = venue.get("slug", "")
-                            link = f"https://wolt.com/sr/srb/restoran/{slug}" if slug else item.get("link", {}).get("target", "")
-                            if not link or link in results_dict: continue
+                        for p in venue.get("promotions", []):
+                            t = p.get("text", "")
+                            if t: akcije.append(t)
                             
-                            status = "Otvoreno" if venue.get("online", False) else "Zatvoreno"
+                        del_price = venue.get("delivery_price_int", -1)
+                        if del_price == 0: akcije.append("Besplatna dostava")
+                        
+                        for t in venue.get("tags", []):
+                            if "wolt+" in t.lower(): akcije.append("Wolt+")
                             
-                            rating_dict = venue.get("rating", {})
-                            ocena = str(rating_dict.get("score", "-")) if rating_dict and "score" in rating_dict else "-"
+                        sredjene_akcije = []
+                        for a in set(akcije):
+                            ac = a.strip()
+                            if "besplatna" in ac.lower() or "free" in ac.lower(): ac = "Besplatna dostava"
+                            elif ac not in ["Wolt+", "Prime"]: ac = ac[0].upper() + ac[1:].replace("rsd", "RSD").replace("din", "DIN")
+                            sredjene_akcije.append(f"• {ac}")
                             
-                            est = venue.get("estimate_range", "")
-                            vreme_str = f"{est} min" if est else "-"
-                            vreme_num = np.nan
-                            if est and "-" in str(est):
-                                parts = str(est).split("-")
-                                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-                                    vreme_num = (int(parts[0]) + int(parts[1])) / 2.0
-                            elif est and str(est).isdigit():
-                                vreme_num = float(est)
-                                
-                            is_new = False
-                            akcije = []
-                            
-                            for b in venue.get("badges", []):
-                                t = b.get("text", "")
-                                if not t: continue
-                                if "novo" in t.lower() or "new" in t.lower(): is_new = True
-                                else: akcije.append(t)
-                                
-                            for p in venue.get("promotions", []):
-                                t = p.get("text", "")
-                                if t: akcije.append(t)
-                                
-                            del_price = venue.get("delivery_price_int", -1)
-                            if del_price == 0: akcije.append("Besplatna dostava")
-                            
-                            for t in venue.get("tags", []):
-                                if "wolt+" in t.lower(): akcije.append("Wolt+")
-                                
-                            sredjene_akcije = []
-                            for a in set(akcije):
-                                ac = a.strip()
-                                if "besplatna" in ac.lower() or "free" in ac.lower(): ac = "Besplatna dostava"
-                                elif ac not in ["Wolt+", "Prime"]: ac = ac[0].upper() + ac[1:].replace("rsd", "RSD").replace("din", "DIN")
-                                sredjene_akcije.append(f"• {ac}")
-                                
-                            akcija_str = "\n".join(sredjene_akcije) if sredjene_akcije else "-"
-                            
-                            results_dict[link] = {
-                                "Adresa": address, "Platforma": "Wolt", "Naziv": ime, "Ocena": ocena,
-                                "Vreme dostave": vreme_str, "Akcija": akcija_str, "Status": status,
-                                "Vreme_Broj": vreme_num, "Is_New": is_new, "Link": link
-                            }
-                            
+                        akcija_str = "\n".join(sredjene_akcije) if sredjene_akcije else "-"
+                        
+                        results_dict[link] = {
+                            "Adresa": address, "Platforma": "Wolt", "Naziv": ime, "Ocena": ocena,
+                            "Vreme dostave": vreme_str, "Akcija": akcija_str, "Status": status,
+                            "Vreme_Broj": vreme_num, "Is_New": is_new, "Link": link
+                        }
+                        
                     trenutni = len(results_dict)
                     if live_ph and live_state is not None:
                         live_state["Wolt"] = trenutni
