@@ -111,7 +111,8 @@ def log_msg(msg, placeholder=None):
     if placeholder: placeholder.text(msg)
 
 # ---------------- LIVE COUNTER UI ----------------
-def refresh_live_ui(ph, wolt_count, glovo_count, address):
+def refresh_live_ui(ph, wolt_count, glovo_count, address, custom_text=None):
+    txt = custom_text if custom_text else f"📍 Currently scanning: <b>{address}</b>"
     html = f"""
     <div class="live-card">
         <div class="wolt-card">
@@ -123,7 +124,7 @@ def refresh_live_ui(ph, wolt_count, glovo_count, address):
             <p class="metric-value" style="color: #ffc244;">{glovo_count}</p>
         </div>
     </div>
-    <p style="text-align: center; color: #666; font-size: 14px;">📍 Currently scanning: <b>{address}</b></p>
+    <p style="text-align: center; color: #666; font-size: 14px;">{txt}</p>
     """
     ph.markdown(html, unsafe_allow_html=True)
 
@@ -347,16 +348,18 @@ def extract_promo(text, html_content, plat):
         for gp in glovo_tags:
             promos.append(gp.strip())
     
-    if any(x in clean_text for x in ["besplatna dostava", "free delivery", "dostava 0", "0 rsd dostava", "delivery 0"]):
+    if any(x in clean_text for x in ["besplatna dostava", "free delivery", "dostava 0", "0 rsd dostava", "delivery 0", "besplatna"]):
         promos.append("Free delivery")
         
     if any(x in clean_text for x in ["1+1", "1 + 1", "buy 1 get 1"]):
         promos.append("1+1 Free")
         
     if plat == "Wolt":
+        # Hvatanje tačnog procenta (npr. "20% discount...")
         for pm in re.findall(r'(\d{1,3}\s*%)', clean_text):
             promos.append(f"{pm.strip()} discount")
-        # Format "RSD400 off" ili "400 RSD popust"
+            
+        # Hvatanje RSD popusta (npr. "RSD400 off" ili "400 RSD popust")
         for rm in re.findall(r'(?:rsd|din)\s*(\d{2,5})|(\d{2,5})\s*(?:rsd|din)', clean_numbers):
             val = rm[0] if rm[0] else rm[1]
             if int(val) > 10: promos.append(f"{val} RSD discount")
@@ -467,8 +470,7 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
         
         # 1. KORAK: NALAZIMO KOORDINATE
         geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(address + ', Serbia')}&format=json&limit=1"
-        geo_resp = await req.get(geo_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-        
+        geo_resp = await req.get(geo_url, headers={"User-Agent": "WoltDeliveryScanner/4.0"})
         if not geo_resp.ok:
             log_msg(f"[WOLT ERROR] Geocode nije uspeo. Status: {geo_resp.status}", log_ph)
             return []
@@ -477,7 +479,7 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
         
         if not geo_data:
             geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(address)}&format=json&limit=1"
-            geo_resp = await req.get(geo_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+            geo_resp = await req.get(geo_url, headers={"User-Agent": "WoltDeliveryScanner/4.0"})
             geo_data = await geo_resp.json()
             
         if not geo_data:
@@ -488,75 +490,78 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
         lon = geo_data[0]["lon"]
         log_msg(f"[WOLT] Koordinate pronađene: {lat}, {lon}. Skidam listu restorana...", log_ph)
         
-        # 2. KORAK: SKIDAMO LISTU SVIH RESTORANA
-        urls_to_check = [
-            f"https://restaurant-api.wolt.com/v1/pages/delivery?lat={lat}&lon={lon}",
-            f"https://restaurant-api.wolt.com/v1/pages/restaurants?lat={lat}&lon={lon}"
-        ]
+        # 2. KORAK: SKIDAMO LISTU SVIH RESTORANA SA FEED-a (Koristimo stabilan endpoint)
+        api_url = f"https://restaurant-api.wolt.com/v1/pages/restaurants?lat={lat}&lon={lon}"
+        wolt_resp = await req.get(api_url)
         
-        for api_url in urls_to_check:
-            wolt_resp = await req.get(api_url)
-            if not wolt_resp.ok:
-                continue
-                
-            wolt_data = await wolt_resp.json()
-            sections = wolt_data.get("sections", [])
+        if not wolt_resp.ok:
+            log_msg(f"[WOLT ERROR] API Feed returned {wolt_resp.status}", log_ph)
+            return []
             
-            for section in sections:
-                for item in section.get("items", []):
-                    venue = item.get("venue")
-                    if not venue: continue
+        wolt_data = await wolt_resp.json()
+        
+        # Čuvamo sve restorane u rečnik bez popusta (popuste ćemo tek izvući)
+        sections = wolt_data.get("sections", [])
+        for section in sections:
+            for item in section.get("items", []):
+                venue = item.get("venue")
+                if not venue: continue
+                
+                name = venue.get("name")
+                slug = venue.get("slug")
+                if not name or not slug: continue
+                
+                link = f"https://wolt.com/sr/srb/restaurant/{slug}"
+                if link in results_dict: continue
+                
+                status = "Open" if venue.get("online") else "Closed"
+                rating_score = venue.get("rating", {}).get("score")
+                rating = str(rating_score) if rating_score else "-"
+                
+                est_range = venue.get("estimate_range")
+                est_minutes = venue.get("estimate")
+                
+                time_num = np.nan
+                time_str = "-"
+                if est_range:
+                    time_str = f"{est_range} min"
+                    try:
+                        parts = str(est_range).split('-')
+                        time_num = (int(parts[0]) + int(parts[1])) / 2.0
+                    except: pass
+                elif est_minutes:
+                    time_str = f"{est_minutes} min"
+                    time_num = float(est_minutes)
                     
-                    name = venue.get("name")
-                    slug = venue.get("slug")
-                    if not name or not slug: continue
-                    
-                    link = f"https://wolt.com/sr/srb/restaurant/{slug}"
-                    
-                    if link in results_dict: continue
-                    
-                    status = "Open" if venue.get("online") else "Closed"
-                    rating_score = venue.get("rating", {}).get("score")
-                    rating = str(rating_score) if rating_score else "-"
-                    
-                    est_range = venue.get("estimate_range")
-                    est_minutes = venue.get("estimate")
-                    
-                    time_num = np.nan
-                    time_str = "-"
-                    if est_range:
-                        time_str = f"{est_range} min"
-                        try:
-                            parts = str(est_range).split('-')
-                            time_num = (int(parts[0]) + int(parts[1])) / 2.0
-                        except: pass
-                    elif est_minutes:
-                        time_str = f"{est_minutes} min"
-                        time_num = float(est_minutes)
-                        
-                    results_dict[link] = {
-                        "Address": address, "Platform": "Wolt", "Name": remove_accents(name), "Rating": rating,
-                        "Delivery Time": time_str, "Promo": "-", "Status": status,
-                        "Time_Num": time_num, "Is_New": False, "Link": link, "Slug": slug
-                    }
-                    
-        log_msg(f"[WOLT - {address}] Skinuta lista od {len(results_dict)} restorana. Ulazim u svaki...", log_ph)
+                # Inicijalni podaci iz feed-a
+                feed_payload = get_all_json_strings(item).lower()
+                is_new = "new" in feed_payload or "novo" in feed_payload or "new!" in feed_payload
+
+                results_dict[link] = {
+                    "Address": address, "Platform": "Wolt", "Name": remove_accents(name), "Rating": rating,
+                    "Delivery Time": time_str, "Promo": "-", "Status": status,
+                    "Time_Num": time_num, "Is_New": is_new, "Link": link, "Slug": slug
+                }
+                
+        # Update Live counter-a
         if live_ph and live_state is not None:
             live_state["Wolt"] = len(results_dict)
-            refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address)
+            refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address, custom_text=f"📍 Skinuto {len(results_dict)} Wolt restorana. Tražim akcije...")
 
-        # 3. KORAK: ULAZIMO U SVAKI RESTORAN DA IZVUČEMO POPUSTE
-        # Ovo radimo u brzim paketima (chunks) od po 10 restorana odjednom
+        log_msg(f"[WOLT - {address}] Skinuta lista od {len(results_dict)} restorana. Ulazim u svaki...", log_ph)
+
+        # 3. KORAK: ULAZIMO U SVAKI RESTORAN PREKO v3 API-ja DA IZVUČEMO SKRIVENE POPUSTE
+        # Smanjili smo paket (chunk) na 5 da nas Wolt sigurno ne blokira zbog previše zahteva (429 status)
         slugs = [v["Slug"] for v in results_dict.values()]
-        chunk_size = 10
+        chunk_size = 5 
         
         for i in range(0, len(slugs), chunk_size):
             chunk = slugs[i:i+chunk_size]
             tasks = []
             
             for s in chunk:
-                # API poziv tačno za stranicu konkretnog restorana (gde stoje offer_trackers)
-                tasks.append(req.get(f"https://restaurant-api.wolt.com/v4/venues/slug/{s}"))
+                # Gađamo v3 endpoint pošto v4 često traži autorizaciju
+                tasks.append(req.get(f"https://restaurant-api.wolt.com/v3/venues/slug/{s}"))
                 
             responses = await asyncio.gather(*tasks, return_exceptions=True)
             
@@ -565,30 +570,31 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
                 if not isinstance(resp, Exception) and resp.ok:
                     try:
                         data = await resp.json()
-                        # Vadi apsolutno sav tekst i brojeve iz JSON-a tog restorana
+                        # Prolazimo kroz celokupan JSON objekat restorana i čupamo SVE stringove
                         full_payload = get_all_json_strings(data).lower()
                         
                         promo_str = extract_promo(full_payload, "", "Wolt")
-                        is_new = "new" in full_payload or "novo" in full_payload or "new!" in full_payload
                         
                         if promo_str != "-":
                             results_dict[link]["Promo"] = promo_str
-                        results_dict[link]["Is_New"] = is_new
-                    except:
-                        pass
+                    except: pass
             
-            # Mala pauza da API ne bi blokirao IP adresu zbog spama
-            await asyncio.sleep(0.4)
+            # Bezbedna pauza između paketa zahteva
+            await asyncio.sleep(0.5)
             
+            # Prikazujemo dokle je stigao u UI-u
             if live_ph and live_state is not None:
-                live_state["Wolt"] = min(i + chunk_size, len(slugs))
-                refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address)
+                skenirano = min(i + chunk_size, len(slugs))
+                refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address, custom_text=f"📍 Skidam akcije: {skenirano}/{len(slugs)} restorana...")
 
-        # Brisanje "Slug" ključa pre nego što vratimo rečnik, da nam ne kvari tabele
+        # Čišćenje "Slug" parametra da nam ne pravi rusvaj u tabelama
         for v in results_dict.values():
             v.pop("Slug", None)
 
-        log_msg(f"[WOLT] Gotovo. Skenirano {len(results_dict)} restorana sa akcijama.", log_ph)
+        log_msg(f"[WOLT] Gotovo. Skenirano {len(results_dict)} restorana.", log_ph)
+        if live_ph and live_state is not None:
+             refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address)
+
         return list(results_dict.values())
         
     except Exception as e:
