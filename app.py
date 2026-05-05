@@ -382,12 +382,12 @@ async def smart_scroll_and_extract(page, plat, address, log_ph=None, live_ph=Non
     
     while True:
         data = await page.evaluate('''() => {
-            let res = [];
+            let rez = [];
             document.querySelectorAll("a:has(h3), a[data-testid='store-card'], .store-card a").forEach(c => {
                 let link = c.href;
-                if (!link.includes('/dostava') && !link.includes('/category')) { res.push({link: link, text: c.innerText, html: c.innerHTML}); }
+                if (!link.includes('/dostava') && !link.includes('/category')) { rez.push({link: link, text: c.innerText, html: c.innerHTML}); }
             });
-            return res;
+            return rez;
         }''')
 
         for item in data:
@@ -532,6 +532,7 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
         return []
 
 
+# ORIGINAL GLOVO LOGIC[cite: 1]
 async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None, debug_mode=False):
     page = None
     try:
@@ -549,8 +550,8 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
             await asyncio.sleep(1)
         except: pass
         
-        page_text = await page.content()
-        if "Oh, no!" in page_text or "It looks like there's a problem" in page_text:
+        stranica_tekst = await page.content()
+        if "Oh, no!" in stranica_tekst or "It looks like there's a problem" in stranica_tekst:
             log_msg(f"[GLOVO BLOCKED] {address}.", log_ph)
             if error_screenshots is not None and debug_mode:
                 try:
@@ -599,40 +600,36 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
                 return []
 
         try:
-            btn_other = page.locator("button:has-text('Drugo')")
-            if not await btn_other.is_visible():
-                btn_other = page.locator("button:has-text('Other')")
-            await btn_other.wait_for(state="visible", timeout=3000)
-            await btn_other.click()
+            btn_drugo = page.locator("button:has-text('Drugo')")
+            await btn_drugo.wait_for(state="visible", timeout=3000)
+            await btn_drugo.click()
         except PlaywrightTimeoutError: pass
         
         try:
-            btn_confirm = page.locator("button:has-text('Potvrdi adresu')")
-            if not await btn_confirm.is_visible():
-                btn_confirm = page.locator("button:has-text('Confirm address')")
-            await btn_confirm.wait_for(state="visible", timeout=3000)
-            await btn_confirm.click()
+            btn_potvrdi = page.locator("button:has-text('Potvrdi adresu')")
+            await btn_potvrdi.wait_for(state="visible", timeout=3000)
+            await btn_potvrdi.click()
         except PlaywrightTimeoutError: pass
         
         await asyncio.sleep(5)
         try:
-            btn_home = page.locator("text='Idi na početnu stranicu'")
-            if await btn_home.count() > 0 and await btn_home.first.is_visible(timeout=3000):
-                await btn_home.first.click()
+            btn_pocetna = page.locator("text='Idi na početnu stranicu'")
+            if await btn_pocetna.count() > 0 and await btn_pocetna.first.is_visible(timeout=3000):
+                await btn_pocetna.first.click()
                 await asyncio.sleep(5)
         except: pass
         
         try:
-            cat_link = page.get_by_role("link", name=re.compile(r"Restorani|Hrana|Food|Restaurants", re.I)).first
-            await cat_link.wait_for(state="visible", timeout=5000)
-            await cat_link.click()
+            kat_link = page.get_by_role("link", name=re.compile(r"Restorani|Hrana|Food|Restaurants", re.I)).first
+            await kat_link.wait_for(state="visible", timeout=5000)
+            await kat_link.click()
         except PlaywrightTimeoutError: pass
         
         await asyncio.sleep(5)
         page.set_default_timeout(60000) 
-        res = await smart_scroll_and_extract(page, "Glovo", address, log_ph, live_ph, live_state)
+        rez = await smart_scroll_and_extract(page, "Glovo", address, log_ph, live_ph, live_state)
         
-        if len(res) < 5 and debug_mode:
+        if len(rez) < 5 and debug_mode:
             if error_screenshots is not None:
                 err_path = str(ERRORS_DIR / f"Glovo_Warning_{remove_accents(address).replace(' ', '_')}_{timestamp()}.png")
                 try:
@@ -640,7 +637,7 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
                     error_screenshots.append(err_path)
                 except: pass
 
-        return res
+        return rez
     except Exception as e: 
         log_msg(f"[GLOVO ERROR] {e}", log_ph)
         if page and error_screenshots is not None and debug_mode:
@@ -677,10 +674,11 @@ async def scan_process(addresses, log_ph, live_ph, live_state, generate_pdf=Fals
         if os.path.exists(WOLT_AUTH_FILE):
             wa["storage_state"] = WOLT_AUTH_FILE
             
+        # RESTORED ACCEPT-LANGUAGE FROM APP(4).PY TO FIX GLOVO BUTTON CLICKS[cite: 1]
         ga = {
             "permissions": ['geolocation'],
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "extra_http_headers": {"Accept-Language": "en-US,en;q=0.9"}
+            "extra_http_headers": {"Accept-Language": "en-US,en;q=0.9,sr;q=0.8"}
         }
         if debug_mode:
             ga["record_video_dir"] = str(ERRORS_DIR)
@@ -709,7 +707,6 @@ async def scan_process(addresses, log_ph, live_ph, live_state, generate_pdf=Fals
             await context_glovo.close() 
             
             log_msg("🚲 Calling WOLT API...", log_ph)
-            # Wolt više ne otvara browser tab, koristi request context direktno
             context_wolt = await browser.new_context(**wa)
             r_wolt = await scrape_wolt_api(context_wolt, adr, log_ph, live_ph, live_state, error_screenshots, debug_mode)
             all_data.extend(r_wolt)
