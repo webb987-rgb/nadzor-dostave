@@ -355,11 +355,8 @@ def extract_promo(text, html_content, plat):
         promos.append("1+1 Free")
         
     if plat == "Wolt":
-        # Hvatanje tačnog procenta (npr. "20% discount...")
         for pm in re.findall(r'(\d{1,3}\s*%)', clean_text):
             promos.append(f"{pm.strip()} discount")
-            
-        # Hvatanje RSD popusta (npr. "RSD400 off" ili "400 RSD popust")
         for rm in re.findall(r'(?:rsd|din)\s*(\d{2,5})|(\d{2,5})\s*(?:rsd|din)', clean_numbers):
             val = rm[0] if rm[0] else rm[1]
             if int(val) > 10: promos.append(f"{val} RSD discount")
@@ -468,9 +465,10 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
         req = context_wolt.request
         log_msg(f"[WOLT] Krenuo API. Geocodiranje adrese: {address}...", log_ph)
         
-        # 1. KORAK: NALAZIMO KOORDINATE
+        # 1. NALAZIMO KOORDINATE
         geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(address + ', Serbia')}&format=json&limit=1"
-        geo_resp = await req.get(geo_url, headers={"User-Agent": "WoltDeliveryScanner/4.0"})
+        geo_resp = await req.get(geo_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        
         if not geo_resp.ok:
             log_msg(f"[WOLT ERROR] Geocode nije uspeo. Status: {geo_resp.status}", log_ph)
             return []
@@ -479,7 +477,7 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
         
         if not geo_data:
             geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(address)}&format=json&limit=1"
-            geo_resp = await req.get(geo_url, headers={"User-Agent": "WoltDeliveryScanner/4.0"})
+            geo_resp = await req.get(geo_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
             geo_data = await geo_resp.json()
             
         if not geo_data:
@@ -490,7 +488,7 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
         lon = geo_data[0]["lon"]
         log_msg(f"[WOLT] Koordinate pronađene: {lat}, {lon}. Skidam listu restorana...", log_ph)
         
-        # 2. KORAK: SKIDAMO LISTU SVIH RESTORANA SA FEED-a (Koristimo stabilan endpoint)
+        # 2. SKIDAMO LISTU SVIH RESTORANA SA FEED-a
         api_url = f"https://restaurant-api.wolt.com/v1/pages/restaurants?lat={lat}&lon={lon}"
         wolt_resp = await req.get(api_url)
         
@@ -500,7 +498,6 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
             
         wolt_data = await wolt_resp.json()
         
-        # Čuvamo sve restorane u rečnik bez popusta (popuste ćemo tek izvući)
         sections = wolt_data.get("sections", [])
         for section in sections:
             for item in section.get("items", []):
@@ -533,7 +530,6 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
                     time_str = f"{est_minutes} min"
                     time_num = float(est_minutes)
                     
-                # Inicijalni podaci iz feed-a
                 feed_payload = get_all_json_strings(item).lower()
                 is_new = "new" in feed_payload or "novo" in feed_payload or "new!" in feed_payload
 
@@ -543,25 +539,30 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
                     "Time_Num": time_num, "Is_New": is_new, "Link": link, "Slug": slug
                 }
                 
-        # Update Live counter-a
         if live_ph and live_state is not None:
             live_state["Wolt"] = len(results_dict)
-            refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address, custom_text=f"📍 Skinuto {len(results_dict)} Wolt restorana. Tražim akcije...")
+            refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address, custom_text=f"📍 Skinuto {len(results_dict)} Wolt restorana. Tražim akcije preko Consumer API-ja...")
 
         log_msg(f"[WOLT - {address}] Skinuta lista od {len(results_dict)} restorana. Ulazim u svaki...", log_ph)
 
-        # 3. KORAK: ULAZIMO U SVAKI RESTORAN PREKO v3 API-ja DA IZVUČEMO SKRIVENE POPUSTE
-        # Smanjili smo paket (chunk) na 5 da nas Wolt sigurno ne blokira zbog previše zahteva (429 status)
+        # 3. KORAK: ULAZIMO U SVAKI RESTORAN PREKO CONSUMER API-ja (TAČAN URL SA TVOG SCREENSHOT-a)
         slugs = [v["Slug"] for v in results_dict.values()]
         chunk_size = 5 
+        
+        headers_consumer = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Origin": "https://wolt.com",
+            "Referer": "https://wolt.com/"
+        }
         
         for i in range(0, len(slugs), chunk_size):
             chunk = slugs[i:i+chunk_size]
             tasks = []
             
             for s in chunk:
-                # Gađamo v3 endpoint pošto v4 često traži autorizaciju
-                tasks.append(req.get(f"https://restaurant-api.wolt.com/v3/venues/slug/{s}"))
+                # OVO JE TVOJ URL SA SCREENSHOTA!
+                dynamic_url = f"https://consumer-api.wolt.com/order-xp/web/v1/venue/slug/{s}/dynamic/?lat={lat}&lon={lon}&selected_delivery_method=homedelivery"
+                tasks.append(req.get(dynamic_url, headers=headers_consumer))
                 
             responses = await asyncio.gather(*tasks, return_exceptions=True)
             
@@ -570,24 +571,20 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
                 if not isinstance(resp, Exception) and resp.ok:
                     try:
                         data = await resp.json()
-                        # Prolazimo kroz celokupan JSON objekat restorana i čupamo SVE stringove
+                        # Izvlači sav tekst i traži 20% itd.
                         full_payload = get_all_json_strings(data).lower()
-                        
                         promo_str = extract_promo(full_payload, "", "Wolt")
                         
                         if promo_str != "-":
                             results_dict[link]["Promo"] = promo_str
                     except: pass
             
-            # Bezbedna pauza između paketa zahteva
             await asyncio.sleep(0.5)
             
-            # Prikazujemo dokle je stigao u UI-u
             if live_ph and live_state is not None:
                 skenirano = min(i + chunk_size, len(slugs))
                 refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address, custom_text=f"📍 Skidam akcije: {skenirano}/{len(slugs)} restorana...")
 
-        # Čišćenje "Slug" parametra da nam ne pravi rusvaj u tabelama
         for v in results_dict.values():
             v.pop("Slug", None)
 
