@@ -369,38 +369,29 @@ def izvuci_vreme_dostave(tekst):
     return "-", np.nan
 
 def izvuci_akciju(tekst, html, plat):
-    cist = (str(tekst) + " \n " + str(html)).lower()
-    cist_tekst = re.sub(r'<[^>]+>', ' ', cist)
-    cist_brojevi = cist_tekst.replace(',', '').replace('.', '')
-    
+    cist = str(tekst) + " \n " + re.sub(r'<[^>]+>', ' \n ', str(html))
     akcije, seen, res = [], set(), []
+    for line in [l.strip().lower() for l in cist.split('\n') if l.strip()]:
+        if len(line) > 80: continue 
+        if any(x in line for x in ["besplatna dostava", "free delivery", "dostava 0", "delivery 0"]): akcije.append("Besplatna dostava")
+        elif "1+1" in line or "buy 1 get 1" in line: akcije.append("1+1 Gratis")
+        elif "%" in line and re.search(r'\d', line):
+            if plat == "Glovo" and re.fullmatch(r'\d{1,3}\s*%', line): continue
+            akcije.append(line)
+        elif any(x in line for x in ["rsd", "din"]) and any(x in line for x in ["-", "off", "discount", "popust", "save", "spend"]): akcije.append(line)
     
-    if any(x in cist_tekst for x in ["besplatna dostava", "free delivery", "dostava 0", "0 rsd dostava", "delivery 0"]):
-        akcije.append("Besplatna dostava")
-        
-    if any(x in cist_tekst for x in ["1+1", "1 + 1", "buy 1 get 1"]):
-        akcije.append("1+1 Gratis")
-        
-    if plat == "Wolt":
-        for pm in re.findall(r'(\d{1,2}\s*%)', cist_tekst):
-            akcije.append(f"{pm.strip()} popusta")
-    else:
-        for pm in re.findall(r'(\d{1,2}\s*%)\s*(?:popust|off|discount|-)', cist_tekst):
-            akcije.append(f"{pm.strip()} popusta")
-            
-    if any(x in cist_tekst for x in ["popust", "off", "uštedi", "save", "discount"]):
-        for rm in re.findall(r'(\d{2,5})\s*(?:rsd|din)', cist_brojevi):
-            if int(rm) > 10: akcije.append(f"{rm} RSD popusta")
-            
-    if "wolt+" in cist_tekst: akcije.append("Wolt+")
-    if "prime" in cist_tekst: akcije.append("Prime")
+    sve_low = (str(tekst) + " " + str(html)).lower()
+    if not akcije:
+        akcije.extend([p.strip() for p in re.findall(r'(-\s*\d{1,2}\s*%|\b\d{1,2}\s*%\s*popust|\b\d{1,2}\s*%\s*off|\b\d{1,2}\s*%\s*discount)', sve_low)])
+    if "wolt+" in sve_low: akcije.append("Wolt+")
+    if "prime" in sve_low: akcije.append("Prime")
         
     for a in akcije:
-        ac = a[0].upper() + a[1:]
-        if ac not in seen:
-            seen.add(ac)
-            res.append(f"• {ac}")
-            
+        ac = re.sub(r'<[^>]+>', '', a).strip()
+        if not ac: continue
+        if "besplatna" in ac.lower() or "free" in ac.lower(): ac = "Besplatna dostava"
+        elif ac not in ["Wolt+", "Prime"]: ac = ac[0].upper() + ac[1:].replace("rsd", "RSD").replace("din", "DIN")
+        if ac not in seen: seen.add(ac); res.append(f"• {ac}")
     return "\n".join(res) if res else "-"
 
 def normalizuj_ime(ime): return re.sub(r'[^\w]', '', str(ime).lower())
@@ -414,21 +405,36 @@ async def pametni_dijetalni_mod(route):
     else:
         await route.continue_()
 
-# ---------------- ORIGINALNO LJUDSKO SKROLOVANJE (SAMO ZA GLOVO) ----------------
+# ---------------- ORIGINALNO LJUDSKO SKROLOVANJE ----------------
 async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, live_ph=None, live_state=None):
     results_dict = {}
     prethodni_broj = 0
     pokusaji_na_dnu = 0
     
     while True:
-        podaci = await page.evaluate('''() => {
-            let rez = [];
-            document.querySelectorAll("a:has(h3), a[data-testid='store-card'], .store-card a").forEach(c => {
-                let link = c.href;
-                if (!link.includes('/dostava') && !link.includes('/category')) { rez.push({link: link, text: c.innerText, html: c.innerHTML}); }
-            });
-            return rez;
-        }''')
+        if plat == "Wolt":
+            podaci = await page.evaluate('''() => {
+                let rez = [];
+                // Hvatamo i klasične kartice i nove "Carousel" (Shopping) kartice
+                document.querySelectorAll("a[data-test-id^='venueCard.'], a[data-test-id^='VenueWindowShoppingCarousel']").forEach(c => {
+                    let link = c.href; 
+                    let text = c.innerText; 
+                    let html = c.innerHTML; 
+                    if (link && text && text.trim().length > 0) {
+                        rez.push({link, text, html});
+                    }
+                });
+                return rez;
+            }''')
+        else:
+            podaci = await page.evaluate('''() => {
+                let rez = [];
+                document.querySelectorAll("a:has(h3), a[data-testid='store-card'], .store-card a").forEach(c => {
+                    let link = c.href;
+                    if (!link.includes('/dostava') && !link.includes('/category')) { rez.push({link: link, text: c.innerText, html: c.innerHTML}); }
+                });
+                return rez;
+            }''')
 
         for item in podaci:
             link = item['link']
@@ -445,8 +451,12 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, li
             vreme_str, vreme_num = izvuci_vreme_dostave(sve_z)
             akcija_str = izvuci_akciju(text, html_content, plat)
             
+            is_new = False
             t_low = text.strip().lower()
-            is_new = t_low.endswith('new') or t_low.endswith('novo') or bool(re.search(r'•.*?new\b', t_low)) or (ocena == "Novo")
+            if plat == "Wolt":
+                is_new = bool(re.search(r'>\s*(novo|new)\s*<', html_content.lower())) or (ocena == "Novo")
+            else:
+                is_new = t_low.endswith('new') or t_low.endswith('novo') or bool(re.search(r'•.*?new\b', t_low)) or (ocena == "Novo")
 
             results_dict[link] = {
                 "Adresa": address, "Platforma": plat, "Naziv": ime, "Ocena": ocena,
@@ -480,10 +490,9 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, li
         
     return list(results_dict.values())
 
-# ---------------- WOLT MREŽNO PRESRETANJE (BEZ BLOKADA) ----------------
+# ---------------- SCRAPERS SA VIDEO SNIMANJEM ----------------
 async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None):
     page = None
-    results_dict = {}
     try:
         page = await context_wolt.new_page()
         
@@ -494,91 +503,6 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
         
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page.set_default_timeout(10000)
-        
-        # OVO JE TAJNA: Lovimo svaki JSON API odgovor dok Playwright skroluje!
-        async def intercept_wolt(response):
-            try:
-                # Filtriramo samo API odgovore koji sadrže podatke o restoranima
-                if "consumer-api.wolt.com" in response.url and ("pages/" in response.url or "discovery" in response.url):
-                    data = await response.json()
-                    
-                    svi_itemi = []
-                    if "sections" in data:
-                        for sec in data["sections"]:
-                            svi_itemi.extend(sec.get("items", []))
-                    if "items" in data:
-                        svi_itemi.extend(data["items"])
-                        
-                    for item in svi_itemi:
-                        venue = item.get("venue")
-                        if not venue: continue
-                        
-                        name = venue.get("name", "")
-                        ime = ukloni_kvacice(name)
-                        if len(ime) < 2: continue
-                        
-                        slug = venue.get("slug", "")
-                        link = f"https://wolt.com/sr/srb/restoran/{slug}" if slug else item.get("link", {}).get("target", "")
-                        if not link or link in results_dict: continue
-                        
-                        status = "Otvoreno" if venue.get("online", False) else "Zatvoreno"
-                        
-                        rating_dict = venue.get("rating", {})
-                        ocena = str(rating_dict.get("score", "-")) if rating_dict and "score" in rating_dict else "-"
-                        
-                        est = venue.get("estimate_range", "")
-                        vreme_str = f"{est} min" if est else "-"
-                        vreme_num = np.nan
-                        if est and "-" in str(est):
-                            parts = str(est).split("-")
-                            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-                                vreme_num = (int(parts[0]) + int(parts[1])) / 2.0
-                        elif est and str(est).isdigit():
-                            vreme_num = float(est)
-                            
-                        is_new = False
-                        akcije = []
-                        
-                        for b in venue.get("badges", []):
-                            t = b.get("text", "")
-                            if not t: continue
-                            if "novo" in t.lower() or "new" in t.lower(): is_new = True
-                            else: akcije.append(t)
-                            
-                        for p in venue.get("promotions", []):
-                            t = p.get("text", "")
-                            if t: akcije.append(t)
-                            
-                        del_price = venue.get("delivery_price_int", -1)
-                        if del_price == 0: akcije.append("Besplatna dostava")
-                        
-                        for t in venue.get("tags", []):
-                            if "wolt+" in t.lower(): akcije.append("Wolt+")
-                            
-                        sredjene_akcije = []
-                        for a in set(akcije):
-                            ac = a.strip()
-                            if "besplatna" in ac.lower() or "free" in ac.lower(): ac = "Besplatna dostava"
-                            elif ac not in ["Wolt+", "Prime"]: ac = ac[0].upper() + ac[1:].replace("rsd", "RSD").replace("din", "DIN")
-                            sredjene_akcije.append(f"• {ac}")
-                            
-                        akcija_str = "\n".join(sredjene_akcije) if sredjene_akcije else "-"
-                        
-                        results_dict[link] = {
-                            "Adresa": address, "Platforma": "Wolt", "Naziv": ime, "Ocena": ocena,
-                            "Vreme dostave": vreme_str, "Akcija": akcija_str, "Status": status,
-                            "Vreme_Broj": vreme_num, "Is_New": is_new, "Link": link
-                        }
-                        
-                    trenutni = len(results_dict)
-                    if live_ph and live_state is not None:
-                        live_state["Wolt"] = trenutni
-                        osvezi_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address)
-            except:
-                pass
-
-        # Vežemo našu tajnu funkciju za svaki odgovor koji browser primi
-        page.on("response", intercept_wolt)
         
         await page.goto("https://wolt.com/sr/srb")
         
@@ -596,13 +520,17 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
             await asyncio.sleep(0.5)
             await page.keyboard.press("Enter")
             
-            # Čekamo da nas prebaci i učita Restorane
             try:
                 btn_restorani = page.locator("[data-test-id='tile-restaurants']").first
                 await btn_restorani.wait_for(state="visible", timeout=10000)
                 await btn_restorani.click()
                 await asyncio.sleep(4)
             except PlaywrightTimeoutError:
+                pass
+            
+            try: 
+                await page.wait_for_selector("a[data-test-id^='venueCard.'], a[data-test-id^='VenueWindowShoppingCarousel']", timeout=15000)
+            except PlaywrightTimeoutError: 
                 pass
             
         except PlaywrightTimeoutError:
@@ -637,29 +565,46 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
                 except PlaywrightTimeoutError:
                     pass
                 
+                try: 
+                    await page.wait_for_selector("a[data-test-id^='venueCard.'], a[data-test-id^='VenueWindowShoppingCarousel']", timeout=15000)
+                except PlaywrightTimeoutError: 
+                    pass
+                
             except PlaywrightTimeoutError:
                 log_msg(f"[WOLT ODUSTAJEM] Ne mogu da nadjem polje za promenu adrese.", log_ph)
+                if page and error_screenshots is not None:
+                    try:
+                        err_path = str(ERRORS_DIR / f"Wolt_Timeout_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
+                        await page.screenshot(path=err_path)
+                        error_screenshots.append(err_path)
+                    except: pass
                 return []
+
+        # =========================================================
+        # --- GENERISANJE HTML FAJLA ZA DEBUGGOVANJE ---
+        try:
+            html_sadrzaj = await page.content()
+            debug_html_path = str(ERRORS_DIR / f"Wolt_Debug_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.html")
+            with open(debug_html_path, "w", encoding="utf-8") as f:
+                f.write(html_sadrzaj)
+            if error_screenshots is not None:
+                error_screenshots.append(debug_html_path)
+            log_msg(f"[SISTEM] Generisan debug HTML fajl za rutu: {address}", log_ph)
+        except Exception as debug_err:
+            log_msg(f"[GREŠKA PRI ČUVANJU HTML-a] {debug_err}", log_ph)
+        # =========================================================
                 
-        # SADA SAMO SKROLUJEMO (Naš API hvatač u pozadini radi ceo posao!)
-        pokusaji_na_dnu = 0
-        for _ in range(40): # Skrolujemo do 40 puta
-            await page.evaluate("window.scrollBy(0, 800);")
-            await asyncio.sleep(1.5) # Dajemo mu vremena da API vrati podatke
-            
-            h = await page.evaluate("document.body.scrollHeight")
-            s = await page.evaluate("window.scrollY + window.innerHeight")
-            
-            if s >= h - 100:
-                pokusaji_na_dnu += 1
-                await asyncio.sleep(2)
-                if pokusaji_na_dnu >= 3: 
-                    break 
-            else:
-                pokusaji_na_dnu = 0
-                
-        log_msg(f"[WOLT ZAVRŠENO] Uhvaćeno {len(results_dict)} restorana u potpunosti iz API-ja!", log_ph)
-        return list(results_dict.values())
+        rez = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", address, log_ph, live_ph, live_state)
+        
+        if len(rez) < 5:
+            if error_screenshots is not None:
+                err_path = str(ERRORS_DIR / f"Wolt_Upozorenje_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
+                try:
+                    await page.screenshot(path=err_path)
+                    error_screenshots.append(err_path)
+                except: pass
+
+        return rez
 
     except Exception as e: 
         log_msg(f"[WOLT GREŠKA] {e}", log_ph)
