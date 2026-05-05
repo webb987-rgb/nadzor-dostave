@@ -16,6 +16,7 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 import time
 import streamlit as st
 import sys
+import requests
 
 # PODEŠAVANJE LOKALNOG VREMENA
 try:
@@ -368,7 +369,6 @@ def izvuci_vreme_dostave(tekst):
     except: pass
     return "-", np.nan
 
-# SUPER PRECIZNA FUNKCIJA ZA POPUSTE
 def izvuci_akciju(tekst, html, plat):
     cist = (str(tekst) + " \n " + str(html)).lower()
     cist_tekst = re.sub(r'<[^>]+>', ' ', cist)
@@ -376,15 +376,12 @@ def izvuci_akciju(tekst, html, plat):
     
     akcije, seen, res = [], set(), []
     
-    # 1. Besplatna dostava
     if any(x in cist_tekst for x in ["besplatna dostava", "free delivery", "dostava 0", "0 rsd dostava", "delivery 0"]):
         akcije.append("Besplatna dostava")
         
-    # 2. 1+1 Gratis
     if any(x in cist_tekst for x in ["1+1", "1 + 1", "buy 1 get 1"]):
         akcije.append("1+1 Gratis")
         
-    # 3. Procenti (%)
     if plat == "Wolt":
         for pm in re.findall(r'(\d{1,2}\s*%)', cist_tekst):
             akcije.append(f"{pm.strip()} popusta")
@@ -392,12 +389,10 @@ def izvuci_akciju(tekst, html, plat):
         for pm in re.findall(r'(\d{1,2}\s*%)\s*(?:popust|off|discount|-)', cist_tekst):
             akcije.append(f"{pm.strip()} popusta")
             
-    # 4. Fiksni popusti u RSD
     if any(x in cist_tekst for x in ["popust", "off", "uštedi", "save", "discount"]):
         for rm in re.findall(r'(\d{2,5})\s*(?:rsd|din)', cist_brojevi):
             if int(rm) > 10: akcije.append(f"{rm} RSD popusta")
             
-    # 5. Wolt+ i Prime
     if "wolt+" in cist_tekst: akcije.append("Wolt+")
     if "prime" in cist_tekst: akcije.append("Prime")
         
@@ -420,37 +415,21 @@ async def pametni_dijetalni_mod(route):
     else:
         await route.continue_()
 
-# ---------------- ORIGINALNO LJUDSKO SKROLOVANJE ----------------
+# ---------------- ORIGINALNO LJUDSKO SKROLOVANJE (SAMO ZA GLOVO) ----------------
 async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, live_ph=None, live_state=None):
     results_dict = {}
     prethodni_broj = 0
     pokusaji_na_dnu = 0
     
     while True:
-        if plat == "Wolt":
-            podaci = await page.evaluate('''() => {
-                let rez = [];
-                // Hvatamo sve kartice, ali ciljamo njihov najširi omotač da pokupimo lebdeće popuste
-                document.querySelectorAll("a[data-test-id^='venueCard.'], a[data-test-id^='VenueWindowShoppingCarousel']").forEach(c => {
-                    let link = c.href; 
-                    let container = c.closest('.rxr2ax2') || c.closest('li') || c.parentElement || c;
-                    let text = container.innerText; 
-                    let html = container.innerHTML; 
-                    if (link && text && text.trim().length > 0) {
-                        rez.push({link, text, html});
-                    }
-                });
-                return rez;
-            }''')
-        else:
-            podaci = await page.evaluate('''() => {
-                let rez = [];
-                document.querySelectorAll("a:has(h3), a[data-testid='store-card'], .store-card a").forEach(c => {
-                    let link = c.href;
-                    if (!link.includes('/dostava') && !link.includes('/category')) { rez.push({link: link, text: c.innerText, html: c.innerHTML}); }
-                });
-                return rez;
-            }''')
+        podaci = await page.evaluate('''() => {
+            let rez = [];
+            document.querySelectorAll("a:has(h3), a[data-testid='store-card'], .store-card a").forEach(c => {
+                let link = c.href;
+                if (!link.includes('/dostava') && !link.includes('/category')) { rez.push({link: link, text: c.innerText, html: c.innerHTML}); }
+            });
+            return rez;
+        }''')
 
         for item in podaci:
             link = item['link']
@@ -467,12 +446,8 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, li
             vreme_str, vreme_num = izvuci_vreme_dostave(sve_z)
             akcija_str = izvuci_akciju(text, html_content, plat)
             
-            is_new = False
             t_low = text.strip().lower()
-            if plat == "Wolt":
-                is_new = bool(re.search(r'>\s*(novo|new)\s*<', html_content.lower())) or (ocena == "Novo")
-            else:
-                is_new = t_low.endswith('new') or t_low.endswith('novo') or bool(re.search(r'•.*?new\b', t_low)) or (ocena == "Novo")
+            is_new = t_low.endswith('new') or t_low.endswith('novo') or bool(re.search(r'•.*?new\b', t_low)) or (ocena == "Novo")
 
             results_dict[link] = {
                 "Adresa": address, "Platforma": plat, "Naziv": ime, "Ocena": ocena,
@@ -506,9 +481,10 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, li
         
     return list(results_dict.values())
 
-# ---------------- SCRAPERS SA VIDEO SNIMANJEM ----------------
+# ---------------- WOLT API MOD (BEZ SKROLOVANJA) ----------------
 async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None):
     page = None
+    results_dict = {}
     try:
         page = await context_wolt.new_page()
         
@@ -520,11 +496,30 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page.set_default_timeout(10000)
         
+        # ================= API INTERCEPTOR =================
+        # Hvata tacne koordinate dok Playwright unosi adresu
+        api_info = {"lat": None, "lon": None, "cookies": ""}
+        
+        async def intercept_wolt(request):
+            url = request.url
+            if "consumer-api.wolt.com" in url and "lat=" in url and "lon=" in url:
+                try:
+                    import urllib.parse
+                    parsed = urllib.parse.urlparse(url)
+                    qs = urllib.parse.parse_qs(parsed.query)
+                    if 'lat' in qs and 'lon' in qs:
+                        api_info['lat'] = qs['lat'][0]
+                        api_info['lon'] = qs['lon'][0]
+                except: pass
+
+        page.on("request", intercept_wolt)
+        
         await page.goto("https://wolt.com/sr/srb")
         
         try: await page.locator("[data-test-id='allow-button']").click(timeout=3000)
         except: pass
         
+        # UI logika: Unosimo adresu samo da bi Wolt opalio background API poziv
         try:
             input_f = page.get_by_role("combobox").first
             await input_f.wait_for(state="visible", timeout=4000)
@@ -536,19 +531,11 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
             await asyncio.sleep(0.5)
             await page.keyboard.press("Enter")
             
-            try:
-                btn_restorani = page.locator("[data-test-id='tile-restaurants']").first
-                await btn_restorani.wait_for(state="visible", timeout=10000)
-                await btn_restorani.click()
-                await asyncio.sleep(4)
-            except PlaywrightTimeoutError:
-                pass
-            
-            try: 
-                await page.wait_for_selector("a[data-test-id^='venueCard.'], a[data-test-id^='VenueWindowShoppingCarousel']", timeout=15000)
-            except PlaywrightTimeoutError: 
-                pass
-            
+            # Cekamo da interceptor uhvati lat/lon (max 15 sek)
+            for _ in range(15):
+                if api_info["lat"] and api_info["lon"]: break
+                await asyncio.sleep(1)
+                
         except PlaywrightTimeoutError:
             log_msg(f"[WOLT] VIP mod. Menjam adresu u header-u za: {address}", log_ph)
             try:
@@ -573,55 +560,140 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
                 await asyncio.sleep(0.5)
                 await page.keyboard.press("Enter")
                 
-                try:
-                    btn_restorani = page.locator("[data-test-id='tile-restaurants']").first
-                    await btn_restorani.wait_for(state="visible", timeout=10000)
-                    await btn_restorani.click()
-                    await asyncio.sleep(4)
-                except PlaywrightTimeoutError:
-                    pass
-                
-                try: 
-                    await page.wait_for_selector("a[data-test-id^='venueCard.'], a[data-test-id^='VenueWindowShoppingCarousel']", timeout=15000)
-                except PlaywrightTimeoutError: 
-                    pass
-                
+                for _ in range(15):
+                    if api_info["lat"] and api_info["lon"]: break
+                    await asyncio.sleep(1)
+                    
             except PlaywrightTimeoutError:
                 log_msg(f"[WOLT ODUSTAJEM] Ne mogu da nadjem polje za promenu adrese.", log_ph)
-                if page and error_screenshots is not None:
-                    try:
-                        err_path = str(ERRORS_DIR / f"Wolt_Timeout_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
-                        await page.screenshot(path=err_path)
-                        error_screenshots.append(err_path)
-                    except: pass
                 return []
 
-        # =========================================================
-        # --- GENERISANJE HTML FAJLA ZA DEBUGGOVANJE ---
-        try:
-            html_sadrzaj = await page.content()
-            debug_html_path = str(ERRORS_DIR / f"Wolt_Debug_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.html")
-            with open(debug_html_path, "w", encoding="utf-8") as f:
-                f.write(html_sadrzaj)
-            if error_screenshots is not None:
-                error_screenshots.append(debug_html_path)
-            log_msg(f"[SISTEM] Generisan debug HTML fajl za rutu: {address}", log_ph)
-        except Exception as debug_err:
-            log_msg(f"[GREŠKA PRI ČUVANJU HTML-a] {debug_err}", log_ph)
-        # =========================================================
-                
-        rez = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", address, log_ph, live_ph, live_state)
+        # Uzimamo kolačiće za autorizaciju i ODMAH GASIMO Playwright
+        cookies = await context_wolt.cookies()
+        api_info["cookies"] = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
         
-        if len(rez) < 5:
-            if error_screenshots is not None:
-                err_path = str(ERRORS_DIR / f"Wolt_Upozorenje_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
+        await page.close()
+        page = None
+        
+        # ================= PURE API REQUESTS (BEZ SKROLOVANJA) =================
+        if api_info["lat"] and api_info["lon"]:
+            lat = api_info["lat"]
+            lon = api_info["lon"]
+            log_msg(f"[WOLT API] Locirano (Lat: {lat}, Lon: {lon}). Čupam podatke sa API-ja...", log_ph)
+            
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Cookie": api_info["cookies"],
+                "Accept": "application/json"
+            }
+            
+            api_url = f"https://consumer-api.wolt.com/consumer-api/discovery/v1/pages/restaurants?lat={lat}&lon={lon}"
+            
+            while api_url:
                 try:
-                    await page.screenshot(path=err_path)
-                    error_screenshots.append(err_path)
-                except: pass
-
-        return rez
-
+                    r = requests.get(api_url, headers=headers, timeout=15)
+                    
+                    if r.status_code != 200:
+                        if "restaurants" in api_url:
+                            api_url = api_url.replace("pages/restaurants", "pages/delivery")
+                            continue
+                        break
+                        
+                    data = r.json()
+                    
+                    for sec in data.get("sections", []):
+                        for item in sec.get("items", []):
+                            venue = item.get("venue")
+                            if not venue: continue
+                            
+                            name = venue.get("name", "")
+                            ime = ukloni_kvacice(name)
+                            if len(ime) < 2: continue
+                            
+                            slug = venue.get("slug", "")
+                            link = f"https://wolt.com/sr/srb/restoran/{slug}" if slug else item.get("link", {}).get("target", "")
+                            if not link or link in results_dict: continue
+                            
+                            status = "Otvoreno" if venue.get("online", False) else "Zatvoreno"
+                            
+                            rating_dict = venue.get("rating", {})
+                            ocena = str(rating_dict.get("score", "-")) if rating_dict and "score" in rating_dict else "-"
+                            
+                            est = venue.get("estimate_range", "")
+                            vreme_str = f"{est} min" if est else "-"
+                            vreme_num = np.nan
+                            if est and "-" in str(est):
+                                parts = str(est).split("-")
+                                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                                    vreme_num = (int(parts[0]) + int(parts[1])) / 2.0
+                            elif est and str(est).isdigit():
+                                vreme_num = float(est)
+                                
+                            is_new = False
+                            akcije = []
+                            
+                            for b in venue.get("badges", []):
+                                t = b.get("text", "")
+                                if not t: continue
+                                if "novo" in t.lower() or "new" in t.lower(): is_new = True
+                                else: akcije.append(t)
+                                
+                            for p in venue.get("promotions", []):
+                                t = p.get("text", "")
+                                if t: akcije.append(t)
+                                
+                            del_price = venue.get("delivery_price_int", -1)
+                            if del_price == 0: akcije.append("Besplatna dostava")
+                            
+                            for t in venue.get("tags", []):
+                                if "wolt+" in t.lower(): akcije.append("Wolt+")
+                                
+                            sredjene_akcije = []
+                            for a in set(akcije):
+                                ac = a.strip()
+                                if "besplatna" in ac.lower() or "free" in ac.lower(): ac = "Besplatna dostava"
+                                elif ac not in ["Wolt+", "Prime"]: ac = ac[0].upper() + ac[1:].replace("rsd", "RSD").replace("din", "DIN")
+                                sredjene_akcije.append(f"• {ac}")
+                                
+                            akcija_str = "\n".join(sredjene_akcije) if sredjene_akcije else "-"
+                            
+                            results_dict[link] = {
+                                "Adresa": address, "Platforma": "Wolt", "Naziv": ime, "Ocena": ocena,
+                                "Vreme dostave": vreme_str, "Akcija": akcija_str, "Status": status,
+                                "Vreme_Broj": vreme_num, "Is_New": is_new, "Link": link
+                            }
+                            
+                    trenutni = len(results_dict)
+                    if live_ph and live_state is not None:
+                        live_state["Wolt"] = trenutni
+                        osvezi_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address)
+                        
+                    next_cursor = data.get("next")
+                    if next_cursor:
+                        if isinstance(next_cursor, str):
+                            api_url = next_cursor if next_cursor.startswith("http") else f"https://consumer-api.wolt.com{next_cursor}"
+                        elif isinstance(next_cursor, dict) and "$oid" in next_cursor:
+                            base = api_url.split("&cursor=")[0]
+                            api_url = f"{base}&cursor={next_cursor['$oid']}"
+                        elif isinstance(next_cursor, dict) and "cursor" in next_cursor:
+                            base = api_url.split("&cursor=")[0]
+                            api_url = f"{base}&cursor={next_cursor['cursor']}"
+                        else:
+                            api_url = None
+                    else:
+                        api_url = None
+                        
+                except Exception as e:
+                    log_msg(f"[WOLT API Greška] {e}", log_ph)
+                    break
+                    
+            log_msg(f"[WOLT API] Skeniranje završeno blickrigom! Uhvaćeno {len(results_dict)} restorana.", log_ph)
+            return list(results_dict.values())
+            
+        else:
+            log_msg("[WOLT UPOZORENJE] Nisam uspeo da uhvatim lat/lon iz pozadine. Vraćam 0.", log_ph)
+            return []
+            
     except Exception as e: 
         log_msg(f"[WOLT GREŠKA] {e}", log_ph)
         if page and error_screenshots is not None:
@@ -632,7 +704,7 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
             except: pass
         return []
     finally:
-        if page: await page.close()
+        if page and not page.is_closed(): await page.close()
 
 async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None):
     page = None
@@ -799,7 +871,7 @@ async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=Fa
             sve.extend(r_glovo)
             await context_glovo.close() 
             
-            log_msg("🚲 Skrolujem WOLT...", log_ph)
+            log_msg("🚲 Preuzimam WOLT sa API-ja...", log_ph)
             context_wolt = await browser.new_context(**wa)
             await context_wolt.route("**/*", pametni_dijetalni_mod)
             r_wolt = await scrape_wolt(context_wolt, adr, log_ph, live_ph, live_state, error_screenshots)
