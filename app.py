@@ -405,7 +405,7 @@ async def pametni_dijetalni_mod(route):
     else:
         await route.continue_()
 
-# ---------------- ORIGINALNO LJUDSKO SKROLOVANJE (ZALEĐENO) ----------------
+# ---------------- ORIGINALNO LJUDSKO SKROLOVANJE ----------------
 async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, live_ph=None, live_state=None):
     results_dict = {}
     prethodni_broj = 0
@@ -415,9 +415,15 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, li
         if plat == "Wolt":
             podaci = await page.evaluate('''() => {
                 let rez = [];
-                document.querySelectorAll("a[data-test-id^='venueCard.']").forEach(c => {
-                    let link = c.href; let text = c.innerText; let p = c.closest("li");
-                    let html = p ? p.innerHTML : c.innerHTML; rez.push({link, text, html});
+                // NOVO: Hvatamo i klasične kartice i nove "Carousel" (Shopping) kartice
+                // Hvatamo same <a> tagove koji drže restoran da bismo izbegli jela
+                document.querySelectorAll("a[data-test-id^='venueCard.'], a[data-test-id^='VenueWindowShoppingCarousel']").forEach(c => {
+                    let link = c.href; 
+                    let text = c.innerText; // Unutar a taga se nalazi samo info restorana (bez jela)
+                    let html = c.innerHTML; 
+                    if (link && text && text.trim().length > 0) {
+                        rez.push({link, text, html});
+                    }
                 });
                 return rez;
             }''')
@@ -491,7 +497,6 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
     try:
         page = await context_wolt.new_page()
         
-        # PODEŠAVANJE VIDEO SNIMANJA (Čuva snimak kad se page ugasi)
         try:
             v_path = await page.video.path()
             if v_path: error_screenshots.append(v_path)
@@ -518,16 +523,17 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
             
             # --- DODATO: Čekamo i klikćemo na kategoriju "Restorani" ---
             try:
-                btn_restorani = page.locator("li[data-test-id='tile-restaurants']").first
+                btn_restorani = page.locator("[data-test-id='tile-restaurants']").first
                 await btn_restorani.wait_for(state="visible", timeout=10000)
                 await btn_restorani.click()
-                await asyncio.sleep(3) # Kratka pauza da se učita nova stranica
+                await asyncio.sleep(4)
             except PlaywrightTimeoutError:
                 pass
             # -----------------------------------------------------------
             
             try: 
-                await page.wait_for_selector("a[data-test-id^='venueCard.']", timeout=15000)
+                # Promenjeno: sada čekamo i na novu VenueWindowShoppingCarousel klasu
+                await page.wait_for_selector("a[data-test-id^='venueCard.'], a[data-test-id^='VenueWindowShoppingCarousel']", timeout=15000)
             except PlaywrightTimeoutError: 
                 pass
             
@@ -557,16 +563,16 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
                 
                 # --- DODATO: Klik na pločicu "Restorani" u VIP modu ---
                 try:
-                    btn_restorani = page.locator("li[data-test-id='tile-restaurants']").first
+                    btn_restorani = page.locator("[data-test-id='tile-restaurants']").first
                     await btn_restorani.wait_for(state="visible", timeout=10000)
                     await btn_restorani.click()
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(4)
                 except PlaywrightTimeoutError:
                     pass
                 # ------------------------------------------------------
                 
                 try: 
-                    await page.wait_for_selector("a[data-test-id^='venueCard.']", timeout=15000)
+                    await page.wait_for_selector("a[data-test-id^='venueCard.'], a[data-test-id^='VenueWindowShoppingCarousel']", timeout=15000)
                 except PlaywrightTimeoutError: 
                     pass
                 
