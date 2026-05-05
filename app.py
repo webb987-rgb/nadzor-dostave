@@ -516,6 +516,16 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
             await asyncio.sleep(0.5)
             await page.keyboard.press("Enter")
             
+            # --- DODATO: Čekamo i klikćemo na kategoriju "Restorani" ---
+            try:
+                btn_restorani = page.locator("li[data-test-id='tile-restaurants']").first
+                await btn_restorani.wait_for(state="visible", timeout=10000)
+                await btn_restorani.click()
+                await asyncio.sleep(3) # Kratka pauza da se učita nova stranica
+            except PlaywrightTimeoutError:
+                pass
+            # -----------------------------------------------------------
+            
             try: 
                 await page.wait_for_selector("a[data-test-id^='venueCard.']", timeout=15000)
             except PlaywrightTimeoutError: 
@@ -544,6 +554,16 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
                 await page.keyboard.press("ArrowDown")
                 await asyncio.sleep(0.5)
                 await page.keyboard.press("Enter")
+                
+                # --- DODATO: Klik na pločicu "Restorani" u VIP modu ---
+                try:
+                    btn_restorani = page.locator("li[data-test-id='tile-restaurants']").first
+                    await btn_restorani.wait_for(state="visible", timeout=10000)
+                    await btn_restorani.click()
+                    await asyncio.sleep(3)
+                except PlaywrightTimeoutError:
+                    pass
+                # ------------------------------------------------------
                 
                 try: 
                     await page.wait_for_selector("a[data-test-id^='venueCard.']", timeout=15000)
