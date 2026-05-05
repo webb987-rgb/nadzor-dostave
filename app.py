@@ -368,7 +368,7 @@ def izvuci_vreme_dostave(tekst):
     except: pass
     return "-", np.nan
 
-# SUPER PRECIZNA FUNKCIJA ZA POPUSTE 
+# SUPER PRECIZNA FUNKCIJA ZA POPUSTE (Preuzeta sa ranijeg taska)
 def izvuci_akciju(tekst, html, plat):
     cist = (str(tekst) + " \n " + str(html)).lower()
     cist_tekst = re.sub(r'<[^>]+>', ' ', cist)
@@ -376,21 +376,24 @@ def izvuci_akciju(tekst, html, plat):
     
     akcije, seen, res = [], set(), []
     
-    if any(x in cist_tekst for x in ["besplatna dostava", "free delivery", "dostava 0", "0 rsd dostava", "delivery 0", "besplatno"]):
+    if any(x in cist_tekst for x in ["besplatna dostava", "free delivery", "dostava 0", "0 rsd dostava", "delivery 0"]):
         akcije.append("Besplatna dostava")
         
-    if any(x in cist_tekst for x in ["1+1", "1 + 1", "buy 1 get 1", "gratis"]):
+    if any(x in cist_tekst for x in ["1+1", "1 + 1", "buy 1 get 1"]):
         akcije.append("1+1 Gratis")
         
-    for pm in re.findall(r'(-\d{1,2}\s*%|\d{1,2}\s*%)', cist_tekst):
-        val = pm.replace('-', '').strip()
-        akcije.append(f"{val} popusta")
+    if plat == "Wolt":
+        for pm in re.findall(r'(\d{1,2}\s*%)', cist_tekst):
+            akcije.append(f"{pm.strip()} popusta")
+    else:
+        for pm in re.findall(r'(\d{1,2}\s*%)\s*(?:popust|off|discount|-)', cist_tekst):
+            akcije.append(f"{pm.strip()} popusta")
             
-    if any(x in cist_tekst for x in ["popust", "off", "uštedi", "save", "discount", "manje", "-"]):
+    if any(x in cist_tekst for x in ["popust", "off", "uštedi", "save", "discount"]):
         for rm in re.findall(r'(\d{2,5})\s*(?:rsd|din)', cist_brojevi):
             if int(rm) > 10: akcije.append(f"{rm} RSD popusta")
             
-    if "wolt+" in cist_tekst or "wolt +" in cist_tekst: akcije.append("Wolt+")
+    if "wolt+" in cist_tekst: akcije.append("Wolt+")
     if "prime" in cist_tekst: akcije.append("Prime")
         
     for a in akcije:
@@ -412,7 +415,7 @@ async def pametni_dijetalni_mod(route):
     else:
         await route.continue_()
 
-# ---------------- ORIGINALNO LJUDSKO SKROLOVANJE SA HIDDEN BADGE EKSTRAKCIJOM ----------------
+# ---------------- ORIGINALNO LJUDSKO SKROLOVANJE ----------------
 async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, live_ph=None, live_state=None):
     results_dict = {}
     prethodni_broj = 0
@@ -422,26 +425,12 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, li
         if plat == "Wolt":
             podaci = await page.evaluate('''() => {
                 let rez = [];
+                // Hvatamo sve kartice, ali ciljamo njihov NAJŠIRI OMOTAČ (li) da bismo pokupili i bedževe sa popustima koji lebde
                 document.querySelectorAll("a[data-test-id^='venueCard.'], a[data-test-id^='VenueWindowShoppingCarousel']").forEach(c => {
                     let link = c.href; 
-                    let container = c.closest('.rxr2ax2') || c.closest('li') || c.parentElement || c;
-                    
-                    let text = container.innerText || ''; 
-                    
-                    // Ekstrakcija iz ARIA labela i ALT tagova koji kriju popuste
-                    let extraTexts = [];
-                    container.querySelectorAll('[aria-label], [alt], [title]').forEach(el => {
-                        let aria = el.getAttribute('aria-label');
-                        let alt = el.getAttribute('alt');
-                        let title = el.getAttribute('title');
-                        if(aria) extraTexts.push(aria);
-                        if(alt) extraTexts.push(alt);
-                        if(title) extraTexts.push(title);
-                    });
-                    
-                    text = text + ' ' + extraTexts.join(' ');
-                    let html = container.innerHTML || ''; 
-                    
+                    let container = c.closest('li') || c.parentElement || c;
+                    let text = container.innerText; 
+                    let html = container.innerHTML; 
                     if (link && text && text.trim().length > 0) {
                         rez.push({link, text, html});
                     }
@@ -453,24 +442,7 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, li
                 let rez = [];
                 document.querySelectorAll("a:has(h3), a[data-testid='store-card'], .store-card a").forEach(c => {
                     let link = c.href;
-                    if (!link.includes('/dostava') && !link.includes('/category')) { 
-                        let text = c.innerText || '';
-                        
-                        let extraTexts = [];
-                        c.querySelectorAll('[aria-label], [alt], [title], .badge, .promotion').forEach(el => {
-                            let aria = el.getAttribute('aria-label');
-                            let alt = el.getAttribute('alt');
-                            let title = el.getAttribute('title');
-                            let inner = el.innerText;
-                            if(aria) extraTexts.push(aria);
-                            if(alt) extraTexts.push(alt);
-                            if(title) extraTexts.push(title);
-                            if(inner) extraTexts.push(inner);
-                        });
-                        text = text + ' ' + extraTexts.join(' ');
-                        
-                        rez.push({link: link, text: text, html: c.innerHTML || ''}); 
-                    }
+                    if (!link.includes('/dostava') && !link.includes('/category')) { rez.push({link: link, text: c.innerText, html: c.innerHTML}); }
                 });
                 return rez;
             }''')
@@ -530,16 +502,15 @@ async def pametno_skrolovanje_i_ekstrakcija(page, plat, address, log_ph=None, li
     return list(results_dict.values())
 
 # ---------------- SCRAPERS SA VIDEO SNIMANJEM ----------------
-async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None, snimaj_proces=False):
+async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None):
     page = None
     try:
         page = await context_wolt.new_page()
         
-        if snimaj_proces:
-            try:
-                v_path = await page.video.path()
-                if v_path: error_screenshots.append(v_path)
-            except: pass
+        try:
+            v_path = await page.video.path()
+            if v_path: error_screenshots.append(v_path)
+        except: pass
         
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page.set_default_timeout(10000)
@@ -612,7 +583,7 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
                 
             except PlaywrightTimeoutError:
                 log_msg(f"[WOLT ODUSTAJEM] Ne mogu da nadjem polje za promenu adrese.", log_ph)
-                if page and error_screenshots is not None and snimaj_proces:
+                if page and error_screenshots is not None:
                     try:
                         err_path = str(ERRORS_DIR / f"Wolt_Timeout_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
                         await page.screenshot(path=err_path)
@@ -621,24 +592,21 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
                 return []
 
         # =========================================================
-        # --- GENERISANJE HTML FAJLA ZA DEBUGGOVANJE (samo ako je čekirano snimanje) ---
-        if snimaj_proces:
-            try:
-                html_sadrzaj = await page.content()
-                debug_html_path = str(ERRORS_DIR / f"Wolt_Debug_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.html")
-                with open(debug_html_path, "w", encoding="utf-8") as f:
-                    f.write(html_sadrzaj)
-                if error_screenshots is not None:
-                    error_screenshots.append(debug_html_path)
-                log_msg(f"[SISTEM] Generisan debug HTML fajl za rutu: {address}", log_ph)
-            except Exception as debug_err:
-                log_msg(f"[GREŠKA PRI ČUVANJU HTML-a] {debug_err}", log_ph)
+        # --- GENERISANJE HTML FAJLA ZA DEBUGGOVANJE ---
+        try:
+            html_sadrzaj = await page.content()
+            debug_html_path = str(ERRORS_DIR / f"Wolt_Debug_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.html")
+            with open(debug_html_path, "w", encoding="utf-8") as f:
+                f.write(html_sadrzaj)
+            if error_screenshots is not None:
+                error_screenshots.append(debug_html_path)
+        except: pass
         # =========================================================
                 
         rez = await pametno_skrolovanje_i_ekstrakcija(page, "Wolt", address, log_ph, live_ph, live_state)
         
         if len(rez) < 5:
-            if error_screenshots is not None and snimaj_proces:
+            if error_screenshots is not None:
                 err_path = str(ERRORS_DIR / f"Wolt_Upozorenje_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
                 try:
                     await page.screenshot(path=err_path)
@@ -649,7 +617,7 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
 
     except Exception as e: 
         log_msg(f"[WOLT GREŠKA] {e}", log_ph)
-        if page and error_screenshots is not None and snimaj_proces:
+        if page and error_screenshots is not None:
             try:
                 err_path = str(ERRORS_DIR / f"Wolt_Error_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
                 await page.screenshot(path=err_path)
@@ -659,16 +627,10 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
     finally:
         if page: await page.close()
 
-async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None, snimaj_proces=False):
+async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None):
     page = None
     try:
         page = await context_glovo.new_page()
-        
-        if snimaj_proces:
-            try:
-                v_path = await page.video.path()
-                if v_path: error_screenshots.append(v_path)
-            except: pass
         
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page.set_default_timeout(10000)
@@ -689,7 +651,7 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
         stranica_tekst = await page.content()
         if "Oh, no!" in stranica_tekst or "It looks like there's a problem" in stranica_tekst:
             log_msg(f"[GLOVO BLOKADA] {address}.", log_ph)
-            if error_screenshots is not None and snimaj_proces:
+            if error_screenshots is not None:
                 try:
                     err_path = str(ERRORS_DIR / f"Glovo_SoftBan_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
                     await page.screenshot(path=err_path)
@@ -726,8 +688,8 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
                 await dropdown_item.wait_for(state="visible", timeout=8000)
                 await dropdown_item.click()
             except PlaywrightTimeoutError:
-                log_msg(f"[GLOVO ODUSTAJEM] Ne mogu da promenim adresu za {address}.", log_ph)
-                if error_screenshots is not None and snimaj_proces:
+                log_msg(f"[GLOVO ODUSTAJEM] Ne mogu da promenim adresu za {address}. Slikam...", log_ph)
+                if error_screenshots is not None:
                     try:
                         err_path = str(ERRORS_DIR / f"Glovo_Nav_Error_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
                         await page.screenshot(path=err_path)
@@ -766,7 +728,7 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
         rez = await pametno_skrolovanje_i_ekstrakcija(page, "Glovo", address, log_ph, live_ph, live_state)
         
         if len(rez) < 5:
-            if error_screenshots is not None and snimaj_proces:
+            if error_screenshots is not None:
                 err_path = str(ERRORS_DIR / f"Glovo_Upozorenje_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
                 try:
                     await page.screenshot(path=err_path)
@@ -776,7 +738,7 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
         return rez
     except Exception as e: 
         log_msg(f"[GLOVO GREŠKA] {e}", log_ph)
-        if page and error_screenshots is not None and snimaj_proces:
+        if page and error_screenshots is not None:
             try:
                 err_path = str(ERRORS_DIR / f"Glovo_Error_{ukloni_kvacice(address).replace(' ', '_')}_{timestamp()}.png")
                 await page.screenshot(path=err_path)
@@ -787,7 +749,7 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
         if page: await page.close()
 
 # ---------------- SEKVENCIJALNI PROCES SKENIRANJA ----------------
-async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=False, email_primaoca="", snimaj_proces=False):
+async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=False, email_primaoca=""):
     sve = []
     error_screenshots = [] 
     
@@ -804,11 +766,9 @@ async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=Fa
         wa = {
             "permissions": ['geolocation'],
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "record_video_dir": str(ERRORS_DIR),
+            "record_video_size": {"width": 1280, "height": 720}
         }
-        if snimaj_proces:
-            wa["record_video_dir"] = str(ERRORS_DIR)
-            wa["record_video_size"] = {"width": 1280, "height": 720}
-            
         if os.path.exists(WOLT_AUTH_FILE):
             log_msg("🔐 WOLT: Učitana VIP propusnica.", log_ph)
             wa["storage_state"] = WOLT_AUTH_FILE
@@ -818,10 +778,6 @@ async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=Fa
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "extra_http_headers": {"Accept-Language": "en-US,en;q=0.9,sr;q=0.8"}
         }
-        if snimaj_proces:
-            ga["record_video_dir"] = str(ERRORS_DIR)
-            ga["record_video_size"] = {"width": 1280, "height": 720}
-            
         if os.path.exists(GLOVO_AUTH_FILE):
             log_msg("🔐 GLOVO: Učitana VIP propusnica.", log_ph)
             ga["storage_state"] = GLOVO_AUTH_FILE
@@ -840,14 +796,14 @@ async def proces_skeniranja(adrese, log_ph, live_ph, live_state, generisi_pdf=Fa
             log_msg("📱 Skrolujem GLOVO...", log_ph)
             context_glovo = await browser.new_context(**ga)
             await context_glovo.route("**/*", pametni_dijetalni_mod)
-            r_glovo = await scrape_glovo(context_glovo, adr, log_ph, live_ph, live_state, error_screenshots, snimaj_proces)
+            r_glovo = await scrape_glovo(context_glovo, adr, log_ph, live_ph, live_state, error_screenshots)
             sve.extend(r_glovo)
             await context_glovo.close() 
             
             log_msg("🚲 Skrolujem WOLT...", log_ph)
             context_wolt = await browser.new_context(**wa)
             await context_wolt.route("**/*", pametni_dijetalni_mod)
-            r_wolt = await scrape_wolt(context_wolt, adr, log_ph, live_ph, live_state, error_screenshots, snimaj_proces)
+            r_wolt = await scrape_wolt(context_wolt, adr, log_ph, live_ph, live_state, error_screenshots)
             sve.extend(r_wolt)
             await context_wolt.close() 
                 
@@ -901,7 +857,6 @@ with st.sidebar:
     
     generisi_pdf = st.checkbox("📄 Generiši PDF izveštaje", value=False)
     email_unos = st.text_input("📧 Pošalji na email:", placeholder="tvoj@email.com") if generisi_pdf else ""
-    snimaj_proces = st.checkbox("🎥 Snimaj proces (za debagovanje)", value=False)
     
     c1, c2 = st.columns(2)
     with c1:
@@ -982,7 +937,7 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
                 sl = st.empty() 
                 live_state = {"Wolt": 0, "Glovo": 0}
                 
-                df, hi, pdf, err_imgs = asyncio.run(proces_skeniranja(lista_adresa, sl, live_ui_ph, live_state, generisi_pdf, email_unos, snimaj_proces))
+                df, hi, pdf, err_imgs = asyncio.run(proces_skeniranja(lista_adresa, sl, live_ui_ph, live_state, generisi_pdf, email_unos))
                 
                 if not df.empty:
                     df.to_csv(OUTPUT_DIR / f"Detaljno_{timestamp()}.csv", index=False)
@@ -1147,19 +1102,18 @@ if st.session_state.pokrenuto or st.session_state.loaded_history:
                     
         # PRIKAZ Videa / Slika / HTML ZA WOLT DEBUGGING
         if st.session_state.get('error_screenshots'):
-            if snimaj_proces:
-                st.markdown("---")
-                st.error("⚠️ PAŽNJA: Skripta je zabeležila potencijalne probleme pri skeniranju ili kreirala fajlove za debagovanje. Proveri ih ispod:")
-                for media_path in st.session_state.error_screenshots:
-                    if media_path.endswith('.webm'):
-                        st.video(media_path)
-                    elif media_path.endswith('.html'):
-                        try:
-                            with open(media_path, "rb") as f:
-                                st.download_button(label=f"📥 Preuzmi HTML ({os.path.basename(media_path)})", data=f, file_name=os.path.basename(media_path), mime="text/html", key=media_path)
-                        except: pass
-                    else:
-                        st.image(media_path, caption=os.path.basename(media_path), use_container_width=True)
+            st.markdown("---")
+            st.error("⚠️ PAŽNJA: Skripta je zabeležila potencijalne probleme pri skeniranju ili kreirala fajlove za debagovanje. Proveri ih ispod:")
+            for media_path in st.session_state.error_screenshots:
+                if media_path.endswith('.webm'):
+                    st.video(media_path)
+                elif media_path.endswith('.html'):
+                    try:
+                        with open(media_path, "rb") as f:
+                            st.download_button(label=f"📥 Preuzmi HTML ({os.path.basename(media_path)})", data=f, file_name=os.path.basename(media_path), mime="text/html", key=media_path)
+                    except: pass
+                else:
+                    st.image(media_path, caption=os.path.basename(media_path), use_container_width=True)
 
     if st.session_state.pokrenuto:
         if auto_refresh:
