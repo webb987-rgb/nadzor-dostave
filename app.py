@@ -510,13 +510,16 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
             await input_f.wait_for(state="visible", timeout=4000)
             await input_f.click(timeout=3000)
             await input_f.fill(address)
-            await asyncio.sleep(2)
+            
+            await asyncio.sleep(3)
             await page.keyboard.press("ArrowDown")
+            await asyncio.sleep(0.5)
             await page.keyboard.press("Enter")
-            await asyncio.sleep(5)
-            await page.goto("https://wolt.com/sr/discovery/restaurants")
-            try: await page.wait_for_selector("a[data-test-id^='venueCard.']", timeout=8000)
-            except PlaywrightTimeoutError: pass
+            
+            try: 
+                await page.wait_for_selector("a[data-test-id^='venueCard.']", timeout=15000)
+            except PlaywrightTimeoutError: 
+                pass
             
         except PlaywrightTimeoutError:
             log_msg(f"[WOLT] VIP mod. Menjam adresu u header-u za: {address}", log_ph)
@@ -537,14 +540,15 @@ async def scrape_wolt(context_wolt, address, log_ph=None, live_ph=None, live_sta
                 await search_modal.click()
                 await search_modal.fill(address)
 
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
                 await page.keyboard.press("ArrowDown")
+                await asyncio.sleep(0.5)
                 await page.keyboard.press("Enter")
-                await asyncio.sleep(5)
                 
-                await page.goto("https://wolt.com/sr/discovery/restaurants")
-                try: await page.wait_for_selector("a[data-test-id^='venueCard.']", timeout=8000)
-                except PlaywrightTimeoutError: pass
+                try: 
+                    await page.wait_for_selector("a[data-test-id^='venueCard.']", timeout=15000)
+                except PlaywrightTimeoutError: 
+                    pass
                 
             except PlaywrightTimeoutError:
                 log_msg(f"[WOLT ODUSTAJEM] Ne mogu da nadjem polje za promenu adrese.", log_ph)
