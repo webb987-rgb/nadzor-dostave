@@ -18,7 +18,7 @@ import time
 import streamlit as st
 import sys
 
-# PODEŠAVANJE VREMENA
+# TIMEZONE SETUP
 try:
     from zoneinfo import ZoneInfo
     LOCAL_TZ = ZoneInfo("Europe/Belgrade")
@@ -39,12 +39,13 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
-# Konfiguracija Streamlit stranice
+# Streamlit Page Config
 st.set_page_config(page_title="Delivery Monitor", page_icon="🍔", layout="wide")
 
-# ================= MODERNI CSS DIZAJN =================
+# ================= MODERN CSS DESIGN =================
 st.markdown("""
 <style>
+    /* Live Counters Style */
     .live-card {
         display: flex; gap: 20px; background: #f8f9fa; padding: 15px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);
     }
@@ -56,6 +57,8 @@ st.markdown("""
     }
     .metric-value { font-size: 32px; font-weight: bold; margin: 0; }
     .metric-title { font-size: 14px; color: #666; margin: 0; text-transform: uppercase; letter-spacing: 1px;}
+    
+    /* Modern Dashboard KPI blocks */
     .kpi-wrapper { display: flex; gap: 15px; margin-bottom: 20px; flex-wrap: wrap; }
     .kpi-card { 
         flex: 1; background: #ffffff; padding: 20px; border-radius: 12px; 
@@ -67,6 +70,8 @@ st.markdown("""
     .kpi-value { font-size: 36px; font-weight: 800; color: #2c3e50; margin: 0; line-height: 1.1;}
     .kpi-wolt { border-bottom: 4px solid #00c2e8; }
     .kpi-glovo { border-bottom: 4px solid #ffc244; }
+
+    /* Tabs Style */
     .stTabs [data-baseweb="tab-list"] { gap: 10px; }
     .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #f0f2f6; border-radius: 8px 8px 0px 0px; padding: 10px 20px; color: #4f4f4f;}
     .stTabs [aria-selected="true"] { background-color: #e0e5ec !important; font-weight: bold; border-bottom: 3px solid #ff4b4b;}
@@ -74,7 +79,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 # ======================================================
 
-# ================= WINDOWS FIX =================
+# ================= WINDOWS & PLAYWRIGHT FIX =================
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
@@ -85,7 +90,7 @@ def install_playwright():
 
 install_playwright()
 
-# ================= GLOBALNA PODEŠAVANJA =================
+# ================= GLOBAL SETTINGS =================
 EMAIL_SENDER = "webb987@gmail.com"
 EMAIL_PASSWORD = "sdehqzbnqefjlomo" 
 
@@ -105,17 +110,25 @@ def log_msg(msg, placeholder=None):
     print(msg)
     if placeholder: placeholder.text(msg)
 
+# ---------------- LIVE COUNTER UI ----------------
 def refresh_live_ui(ph, wolt_count, glovo_count, address, custom_text=None):
     txt = custom_text if custom_text else f"📍 Currently scanning: <b>{address}</b>"
     html = f"""
     <div class="live-card">
-        <div class="wolt-card"><p class="metric-title">🚲 Wolt</p><p class="metric-value" style="color: #00c2e8;">{wolt_count}</p></div>
-        <div class="glovo-card"><p class="metric-title">🍔 Glovo</p><p class="metric-value" style="color: #ffc244;">{glovo_count}</p></div>
+        <div class="wolt-card">
+            <p class="metric-title">🚲 Wolt</p>
+            <p class="metric-value" style="color: #00c2e8;">{wolt_count}</p>
+        </div>
+        <div class="glovo-card">
+            <p class="metric-title">🍔 Glovo</p>
+            <p class="metric-value" style="color: #ffc244;">{glovo_count}</p>
+        </div>
     </div>
     <p style="text-align: center; color: #666; font-size: 14px;">{txt}</p>
     """
     ph.markdown(html, unsafe_allow_html=True)
 
+# ---------------- CYRILLIC & EMAIL SUPPORT ----------------
 def cyrillic_to_latin(text):
     if not text: return ""
     mapa = { 'а':'a', 'б':'b', 'в':'v', 'г':'g', 'д':'d', 'ђ':'dj', 'е':'e', 'ж':'z', 'з':'z', 'и':'i', 'ј':'j', 'к':'k', 'л':'l', 'љ':'lj', 'м':'m', 'н':'n', 'њ':'nj', 'о':'o', 'п':'p', 'р':'r', 'с':'s', 'т':'t', 'ћ':'c', 'у':'u', 'ф':'f', 'х':'h', 'ц':'c', 'ч':'c', 'џ':'dz', 'ш':'s', 'А':'A', 'Б':'B', 'В':'V', 'Г':'G', 'Д':'D', 'Ђ':'Dj', 'Е':'E', 'Ж':'Z', 'З':'Z', 'И':'I', 'Ј':'J', 'К':'K', 'Л':'L', 'Љ':'Lj', 'М':'M', 'Н':'N', 'Њ':'Nj', 'О':'O', 'П':'P', 'Р':'R', 'С':'S', 'Т':'T', 'Ћ':'C', 'У':'U', 'Ф':'F', 'Х':'H', 'Ц':'C', 'Ч':'C', 'Џ':'Dz', 'Ш':'S' }
@@ -149,6 +162,7 @@ def send_email(pdf_paths, recipients_str, log_ph=None):
         log_msg("[SUCCESS] All emails sent!", log_ph)
     except Exception as e: log_msg(f"[ERROR] Email failed: {e}", log_ph)
 
+# ---------------- HISTORY ----------------
 def save_to_history(df):
     time_now = format_time_short()
     date_now = local_time().strftime("%Y-%m-%d")
@@ -184,7 +198,7 @@ def save_to_history(df):
     st.session_state.df_history = df_combined
     return df_combined
 
-# ================= GRAFIKONI =================
+# ================= MODERN UI CHARTS (PLOTLY) =================
 def create_status_chart_ui(df_sub, title):
     wolt_o = len(df_sub[(df_sub["Platform"] == "Wolt") & (df_sub["Status"] == "Open")])
     wolt_z = len(df_sub[(df_sub["Platform"] == "Wolt") & (df_sub["Status"] == "Closed")])
@@ -309,47 +323,55 @@ def extract_delivery_time(text):
     except: pass
     return "-", np.nan
 
+# ================= REKURZIVNO ČUPANJE JSON TEKSTOVA I PAMETNI PROMO EXTRACT =================
 def get_all_json_strings(obj):
+    """Prolazi kroz ceo JSON rekurzivno i skuplja SVE tekstove."""
     if isinstance(obj, dict):
         return " ".join(get_all_json_strings(v) for v in obj.values() if v is not None)
     elif isinstance(obj, list):
         return " ".join(get_all_json_strings(i) for i in obj if i is not None)
     elif isinstance(obj, str):
         return obj
-    elif isinstance(obj, (int, float)):
-        return str(obj)
+    # Namerno preskacemo sirove brojeve jer oni prave haos tipa 50000 -> 05000 RSD discount
     return ""
 
 def extract_promo(text, html_content, plat):
-    clean = (str(text) + " \n " + str(html_content)).lower()
-    clean_text = re.sub(r'<[^>]+>', ' ', clean)
-    clean_numbers = clean_text.replace(',', '').replace('.', '')
+    clean_text = (str(text) + " \n " + str(html_content)).lower()
+    clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
+    
+    # Samo izbacujemo tacke i zareze izmedju cifara (npr 1.000 -> 1000) da bi regex lakse uhvatio prave cene
+    clean_text = re.sub(r'(?<=\d)[.,](?=\d)', '', clean_text)
     
     promos, seen, res = [], set(), []
 
+    # GLOVO HTML TAGOVI
     if plat == "Glovo" and html_content:
         glovo_tags = re.findall(r'data-style="promotion"[^>]*>([^<]+)<', str(html_content))
         for gp in glovo_tags:
             promos.append(gp.strip())
     
+    # FREE DELIVERY
     if any(x in clean_text for x in ["besplatna dostava", "free delivery", "dostava 0", "0 rsd dostava", "delivery 0", "besplatna"]):
         promos.append("Free delivery")
         
+    # 1+1 FREE
     if any(x in clean_text for x in ["1+1", "1 + 1", "buy 1 get 1"]):
         promos.append("1+1 Free")
         
-    if plat == "Wolt":
-        for pm in re.findall(r'(\d{1,3}\s*%)', clean_text):
-            promos.append(f"{pm.strip()} discount")
-        for rm in re.findall(r'(?:rsd|din)\s*(\d{2,5})|(\d{2,5})\s*(?:rsd|din)', clean_numbers):
-            val = rm[0] if rm[0] else rm[1]
-            if int(val) > 10: promos.append(f"{val} RSD discount")
-    else:
-        for pm in re.findall(r'(\d{1,2}\s*%)\s*(?:popust|off|discount|-)', clean_text):
-            promos.append(f"{pm.strip()} discount")
-        for rm in re.findall(r'(\d{2,5})\s*(?:rsd|din)', clean_numbers):
-            if int(rm) > 10: promos.append(f"{rm} RSD discount")
-            
+    # PROCENAT POPUSTA (Od 1 do 99%)
+    for pm in re.findall(r'\b([1-9][0-9]?\s*%)\b', clean_text):
+        promos.append(f"{pm.replace(' ', '')} discount")
+
+    # FIKSNI RSD/DIN POPUSTI (Povezan strogo za rec off, popust, discount itd da izbegnemo vadjenje slucajnih cena)
+    for rm in re.findall(r'(?:rsd|din)\s*(\d{2,5})\s*(?:off|popust|discount)', clean_text):
+        promos.append(f"{rm} RSD discount")
+        
+    for rm in re.findall(r'(\d{2,5})\s*(?:rsd|din)\s*(?:off|popust|discount)', clean_text):
+        promos.append(f"{rm} RSD discount")
+        
+    for rm in re.findall(r'(?:uštedi|save|popust)\s*(\d{2,5})\s*(?:rsd|din)', clean_text):
+        promos.append(f"{rm} RSD discount")
+        
     if "wolt+" in clean_text: promos.append("Wolt+")
     if "prime" in clean_text: promos.append("Prime")
         
@@ -440,15 +462,15 @@ async def smart_scroll_and_extract(page, plat, address, log_ph=None, live_ph=Non
 
 # ---------------- SCRAPERS ----------------
 
-# HIBRIDNI API SCRAPER ZA WOLT
+# HIBRIDNI API SCRAPER ZA WOLT (Bypass Datadome blokade + API)
 async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None, debug_mode=False):
-    results_dict = {} # Indexiramo po SLUG-u da lakse dodamo popuste
+    results_dict = {}
     page = None
     try:
         import urllib.request, json
         log_msg(f"[WOLT] Krenuo hibridni API. Geocodiranje adrese: {address}...", log_ph)
         
-        # 1. NALAZIMO KOORDINATE PREKO JAVNOG API-ja (Sa prosirenim podacima za grad)
+        # 1. NALAZIMO KOORDINATE PREKO JAVNOG API-ja
         custom_agent = 'DeliveryMonitorApp/5.0 (wolt_scraper)'
         try:
             geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(address + ', Serbia')}&format=json&limit=1&addressdetails=1"
@@ -473,18 +495,15 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
         lat = geo_data[0]["lat"]
         lon = geo_data[0]["lon"]
         
-        # Ekstrakcija imena grada da bismo pravili tačne linkove (/nis/, /beograd/ itd.)
         city_raw = geo_data[0].get("address", {}).get("city", geo_data[0].get("address", {}).get("town", "srb"))
         city_slug = normalize_name(cyrillic_to_latin(city_raw))
         
         log_msg(f"[WOLT] Koordinate: {lat}, {lon} (Grad: {city_slug}). Ulazim u browser...", log_ph)
         
-        # 2. OTVARAMO STRANICU DA BI DOBILI LEGALNE BROWSER COOKIES
         page = await context_wolt.new_page()
         await page.goto("https://wolt.com/sr/srb")
         await asyncio.sleep(2) 
         
-        # Povlaci feed
         wolt_data = await page.evaluate(f"""async () => {{
             try {{
                 let res = await fetch("https://restaurant-api.wolt.com/v1/pages/restaurants?lat={lat}&lon={lon}");
@@ -517,16 +536,12 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
                 slug = venue.get("slug")
                 if not name or not slug: continue
                 
-                if slug in results_dict: continue
-                
-                # Resavamo problem novih Wolt linkova koji zahtevaju grad
                 link_target = item.get("link", {}).get("target", "")
-                if link_target.startswith("http"):
-                    link = link_target
-                elif link_target.startswith("/"):
-                    link = f"https://wolt.com{link_target}"
-                else:
-                    link = f"https://wolt.com/sr/srb/{city_slug}/restaurant/{slug}"
+                if link_target.startswith("http"): link = link_target
+                elif link_target.startswith("/"): link = f"https://wolt.com{link_target}"
+                else: link = f"https://wolt.com/sr/srb/{city_slug}/restaurant/{slug}"
+                
+                if link in results_dict: continue
                 
                 status = "Open" if venue.get("online") else "Closed"
                 rating_score = venue.get("rating", {}).get("score")
@@ -550,7 +565,6 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
                 feed_payload = get_all_json_strings(item).lower()
                 is_new = "new" in feed_payload or "novo" in feed_payload or "new!" in feed_payload
 
-                # Čuvamo promo koji smo našli na glavnoj strani (ako postoji)
                 promo_initial = extract_promo(feed_payload, "", "Wolt")
 
                 results_dict[slug] = {
@@ -580,7 +594,6 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
                             results[slug] = await res.json();
                             success = true;
                         } else if (res.status === 429) {
-                            // Ako nas blokira, cekamo 2 sekunde pa probamo opet
                             await new Promise(r => setTimeout(r, 2000)); 
                             retries--;
                         } else {
@@ -592,7 +605,6 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
                         success = true;
                     }
                 }
-                // Delay izmedju uspesnih upita
                 await new Promise(r => setTimeout(r, 300)); 
             }
             return results;
@@ -611,7 +623,6 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
                     full_payload = get_all_json_strings(data).lower()
                     promo_new = extract_promo(full_payload, "", "Wolt")
                     
-                    # Spajamo staru (ako ima) i novu akciju da nista ne propustimo
                     existing_promo = results_dict[slug]["Promo"]
                     final_promos = set()
                     
@@ -631,6 +642,9 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
             if live_ph and live_state is not None:
                 skenirano = min(i + chunk_size, len(slugs))
                 refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address, custom_text=f"📍 Skidam akcije: {skenirano}/{len(slugs)} restorana...")
+
+        for v in results_dict.values():
+            v.pop("Slug", None)
 
         log_msg(f"[WOLT] Gotovo. Skenirano {len(results_dict)} restorana.", log_ph)
         if live_ph and live_state is not None:
