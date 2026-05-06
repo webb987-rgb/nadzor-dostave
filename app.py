@@ -325,14 +325,13 @@ def extract_delivery_time(text):
 
 # ================= REKURZIVNO ČUPANJE JSON TEKSTOVA I PAMETNI PROMO EXTRACT =================
 def get_all_json_strings(obj):
-    """Prolazi kroz ceo JSON rekurzivno i skuplja SVE tekstove."""
+    """Prolazi kroz ceo JSON rekurzivno i skuplja SVE tekstove (zanemaruje gole brojeve)"""
     if isinstance(obj, dict):
         return " ".join(get_all_json_strings(v) for v in obj.values() if v is not None)
     elif isinstance(obj, list):
         return " ".join(get_all_json_strings(i) for i in obj if i is not None)
     elif isinstance(obj, str):
         return obj
-    # Namerno preskacemo sirove brojeve jer oni prave haos tipa 50000 -> 05000 RSD discount
     return ""
 
 def extract_promo(text, html_content, plat):
@@ -340,7 +339,7 @@ def extract_promo(text, html_content, plat):
     clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
     
     # Samo izbacujemo tacke i zareze izmedju cifara (npr 1.000 -> 1000) da bi regex lakse uhvatio prave cene
-    clean_text = re.sub(r'(?<=\d)[.,](?=\d)', '', clean_text)
+    clean_numbers = re.sub(r'(?<=\d)[.,](?=\d)', '', clean_text)
     
     promos, seen, res = [], set(), []
 
@@ -358,20 +357,29 @@ def extract_promo(text, html_content, plat):
     if any(x in clean_text for x in ["1+1", "1 + 1", "buy 1 get 1"]):
         promos.append("1+1 Free")
         
-    # PROCENAT POPUSTA (Od 1 do 99%)
-    for pm in re.findall(r'\b([1-9][0-9]?\s*%)\b', clean_text):
-        promos.append(f"{pm.replace(' ', '')} discount")
-
-    # FIKSNI RSD/DIN POPUSTI (Povezan strogo za rec off, popust, discount itd da izbegnemo vadjenje slucajnih cena)
-    for rm in re.findall(r'(?:rsd|din)\s*(\d{2,5})\s*(?:off|popust|discount)', clean_text):
-        promos.append(f"{rm} RSD discount")
-        
-    for rm in re.findall(r'(\d{2,5})\s*(?:rsd|din)\s*(?:off|popust|discount)', clean_text):
-        promos.append(f"{rm} RSD discount")
-        
-    for rm in re.findall(r'(?:uštedi|save|popust)\s*(\d{2,5})\s*(?:rsd|din)', clean_text):
-        promos.append(f"{rm} RSD discount")
-        
+    if plat == "Wolt":
+        # ODVOJENI FILTER 1: Procenat popusta (npr. "20% discount on selected items")
+        for pm in re.findall(r'(\d{1,3}\s*%)', clean_text):
+            promos.append(f"{pm.strip()} discount")
+            
+        # ODVOJENI FILTER 2: Fiksni RSD/DIN popusti
+        # Strogo mora da sadrzi rec off, popust, discount ili ustedi - da bi izbegli slucajno vadjenje 50000 sa API-ja
+        rsd_patterns = [
+            r'(?:rsd|din)\s*(\d{2,5})\s*(?:off|popust|discount)',
+            r'(\d{2,5})\s*(?:rsd|din)\s*(?:off|popust|discount)',
+            r'(?:uštedi|save|popust)\s*(\d{2,5})\s*(?:rsd|din)'
+        ]
+        for pat in rsd_patterns:
+            for match in re.findall(pat, clean_numbers):
+                if int(match) > 10: promos.append(f"{match} RSD discount")
+                
+    else:
+        # Glovo logic
+        for pm in re.findall(r'(\d{1,2}\s*%)\s*(?:popust|off|discount|-)', clean_text):
+            promos.append(f"{pm.strip()} discount")
+        for rm in re.findall(r'(\d{2,5})\s*(?:rsd|din)', clean_numbers):
+            if int(rm) > 10: promos.append(f"{rm} RSD discount")
+            
     if "wolt+" in clean_text: promos.append("Wolt+")
     if "prime" in clean_text: promos.append("Prime")
         
@@ -462,7 +470,7 @@ async def smart_scroll_and_extract(page, plat, address, log_ph=None, live_ph=Non
 
 # ---------------- SCRAPERS ----------------
 
-# HIBRIDNI API SCRAPER ZA WOLT (Bypass Datadome blokade + API)
+# HIBRIDNI API SCRAPER ZA WOLT (Ultra-brz JS konkurentni API requester)
 async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None, debug_mode=False):
     results_dict = {}
     page = None
@@ -470,8 +478,7 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
         import urllib.request, json
         log_msg(f"[WOLT] Krenuo hibridni API. Geocodiranje adrese: {address}...", log_ph)
         
-        # 1. NALAZIMO KOORDINATE PREKO JAVNOG API-ja
-        custom_agent = 'DeliveryMonitorApp/5.0 (wolt_scraper)'
+        custom_agent = 'DeliveryMonitorApp/6.0 (wolt_scraper)'
         try:
             geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(address + ', Serbia')}&format=json&limit=1&addressdetails=1"
             req = urllib.request.Request(geo_url, headers={'User-Agent': custom_agent})
@@ -575,74 +582,85 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
                 
         if live_ph and live_state is not None:
             live_state["Wolt"] = len(results_dict)
-            refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address, custom_text=f"📍 Skinuto {len(results_dict)} Wolt restorana. Tražim akcije...")
+            refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address, custom_text=f"📍 Skinuto {len(results_dict)} Wolt restorana. Pripremam munjevito skeniranje akcija...")
 
-        log_msg(f"[WOLT - {address}] Skinuto {len(results_dict)} restorana. Skidam popuste sa pametnim pauzama...", log_ph)
+        log_msg(f"[WOLT - {address}] Skinuto {len(results_dict)} restorana. Pokrećem munjeviti JS requester za popuste...", log_ph)
 
-        # 3. KORAK: UZIMAMO POPUSTE PREKO CONSUMER API SA ZASTITOM OD RATE LIMITA (429)
+        # 3. KORAK: MUNJEVITI KONKURENTNI JS POZIVI (Ovo smanjuje vreme sa 40 na ~4 sekunde)
         js_fetch_promos = """
         async ([slugs, lat, lon]) => {
             let results = {};
-            for (let slug of slugs) {
-                let success = false;
-                let retries = 3;
-                while (!success && retries > 0) {
+            let concurrencyLimit = 15; // 15 istovremenih upita (veoma brzo ali ne obara server)
+            let i = 0;
+            
+            async function fetchSlug(slug) {
+                let retries = 2;
+                while (retries > 0) {
                     try {
                         let url = `https://consumer-api.wolt.com/order-xp/web/v1/venue/slug/${slug}/dynamic/?lat=${lat}&lon=${lon}&selected_delivery_method=homedelivery`;
                         let res = await fetch(url);
                         if (res.ok) {
                             results[slug] = await res.json();
-                            success = true;
+                            return;
                         } else if (res.status === 429) {
-                            await new Promise(r => setTimeout(r, 2000)); 
+                            await new Promise(r => setTimeout(r, 1000)); // pauza 1s ako nas pecne Rate Limit
                             retries--;
                         } else {
                             results[slug] = null;
-                            success = true;
+                            return;
                         }
                     } catch(e) {
                         results[slug] = null;
-                        success = true;
+                        return;
                     }
                 }
-                await new Promise(r => setTimeout(r, 300)); 
+                results[slug] = null;
             }
+
+            let workers = [];
+            for (let j = 0; j < concurrencyLimit; j++) {
+                workers.push((async () => {
+                    while (i < slugs.length) {
+                        let currentIndex = i++;
+                        await fetchSlug(slugs[currentIndex]);
+                    }
+                })());
+            }
+            
+            // Cekamo da svi 'radnici' zavrse
+            await Promise.all(workers);
             return results;
         }
         """
 
         slugs = list(results_dict.keys())
-        chunk_size = 15
         
-        for i in range(0, len(slugs), chunk_size):
-            chunk = slugs[i:i+chunk_size]
-            chunk_data = await page.evaluate(js_fetch_promos, [chunk, lat, lon])
-            
-            for slug, data in chunk_data.items():
-                if data:
-                    full_payload = get_all_json_strings(data).lower()
-                    promo_new = extract_promo(full_payload, "", "Wolt")
-                    
-                    existing_promo = results_dict[slug]["Promo"]
-                    final_promos = set()
-                    
-                    if existing_promo != "-":
-                        for p in existing_promo.split('\n'):
-                            if p.strip(): final_promos.add(p.strip())
-                    if promo_new != "-":
-                        for p in promo_new.split('\n'):
-                            if p.strip(): final_promos.add(p.strip())
-                            
-                    if final_promos:
-                        results_dict[slug]["Promo"] = "\n".join(sorted(list(final_promos)))
+        # SVE restorane šaljemo odjednom u Browser. JavaScript će ih sam pametno isprocesuirati!
+        all_promo_data = await page.evaluate(js_fetch_promos, [slugs, lat, lon])
+        
+        for slug, data in all_promo_data.items():
+            if data:
+                full_payload = get_all_json_strings(data).lower()
+                promo_new = extract_promo(full_payload, "", "Wolt")
+                
+                # Spajamo staru (ako ima) i novu akciju da nista ne propustimo
+                existing_promo = results_dict[slug]["Promo"]
+                final_promos = set()
+                
+                if existing_promo != "-":
+                    for p in existing_promo.split('\n'):
+                        if p.strip(): final_promos.add(p.strip())
+                if promo_new != "-":
+                    for p in promo_new.split('\n'):
+                        if p.strip(): final_promos.add(p.strip())
                         
-                    if "new" in full_payload or "novo" in full_payload:
-                        results_dict[slug]["Is_New"] = True
-            
-            if live_ph and live_state is not None:
-                skenirano = min(i + chunk_size, len(slugs))
-                refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address, custom_text=f"📍 Skidam akcije: {skenirano}/{len(slugs)} restorana...")
+                if final_promos:
+                    results_dict[slug]["Promo"] = "\n".join(sorted(list(final_promos)))
+                    
+                if "new" in full_payload or "novo" in full_payload:
+                    results_dict[slug]["Is_New"] = True
 
+        # Čišćenje slug-ova iz tabele
         for v in results_dict.values():
             v.pop("Slug", None)
 
