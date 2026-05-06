@@ -323,18 +323,24 @@ def extract_delivery_time(text):
     except: pass
     return "-", np.nan
 
-# ================= REKURZIVNO ČUPANJE JSON TEKSTOVA =================
-def get_all_json_strings(obj):
-    """Prolazi kroz ceo JSON rekurzivno i skuplja sve tekstove i brojeve."""
+
+# ================= CILJANO ČUPANJE TEKSTOVA ZA WOLT API =================
+def find_promo_strings(obj):
+    """
+    Pametna rekurzivna funkcija koja ulazi u JSON duboko
+    i ciljano traži samo ključeve gde se krije popust (text, title, formatted_text)
+    """
+    found = []
     if isinstance(obj, dict):
-        return " ".join(get_all_json_strings(v) for v in obj.values() if v is not None)
+        for k, v in obj.items():
+            if k in ['text', 'formatted_text', 'title', 'subtitle', 'applied_subtitle'] and isinstance(v, str):
+                found.append(v)
+            else:
+                found.extend(find_promo_strings(v))
     elif isinstance(obj, list):
-        return " ".join(get_all_json_strings(i) for i in obj if i is not None)
-    elif isinstance(obj, str):
-        return obj
-    elif isinstance(obj, (int, float)):
-        return str(obj)
-    return ""
+        for i in obj:
+            found.extend(find_promo_strings(i))
+    return found
 
 def extract_promo(text, html_content, plat):
     clean = (str(text) + " \n " + str(html_content)).lower()
@@ -355,6 +361,7 @@ def extract_promo(text, html_content, plat):
         promos.append("1+1 Free")
         
     if plat == "Wolt":
+        # Hvatanje "20% discount..."
         for pm in re.findall(r'(\d{1,3}\s*%)', clean_text):
             promos.append(f"{pm.strip()} discount")
         for rm in re.findall(r'(?:rsd|din)\s*(\d{2,5})|(\d{2,5})\s*(?:rsd|din)', clean_numbers):
@@ -388,7 +395,7 @@ async def smart_diet_mode(route):
     else:
         await route.continue_()
 
-# ---------------- SMART SCROLLING (SAMO ZA GLOVO UI) ----------------
+# ---------------- SMART SCROLLING (GLOVO UI) ----------------
 async def smart_scroll_and_extract(page, plat, address, log_ph=None, live_ph=None, live_state=None):
     results_dict = {}
     prev_count = 0
@@ -467,7 +474,7 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
         
         # 1. NALAZIMO KOORDINATE
         geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(address + ', Serbia')}&format=json&limit=1"
-        geo_resp = await req.get(geo_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        geo_resp = await req.get(geo_url)
         
         if not geo_resp.ok:
             log_msg(f"[WOLT ERROR] Geocode nije uspeo. Status: {geo_resp.status}", log_ph)
@@ -477,7 +484,7 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
         
         if not geo_data:
             geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(address)}&format=json&limit=1"
-            geo_resp = await req.get(geo_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            geo_resp = await req.get(geo_url)
             geo_data = await geo_resp.json()
             
         if not geo_data:
@@ -488,7 +495,7 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
         lon = geo_data[0]["lon"]
         log_msg(f"[WOLT] Koordinate pronađene: {lat}, {lon}. Skidam listu restorana...", log_ph)
         
-        # 2. SKIDAMO LISTU SVIH RESTORANA SA FEED-a
+        # 2. SKIDAMO LISTU SVIH RESTORANA SA FEED-a (Stavlja ih u results_dict)
         api_url = f"https://restaurant-api.wolt.com/v1/pages/restaurants?lat={lat}&lon={lon}"
         wolt_resp = await req.get(api_url)
         
@@ -529,14 +536,11 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
                 elif est_minutes:
                     time_str = f"{est_minutes} min"
                     time_num = float(est_minutes)
-                    
-                feed_payload = get_all_json_strings(item).lower()
-                is_new = "new" in feed_payload or "novo" in feed_payload or "new!" in feed_payload
 
                 results_dict[link] = {
                     "Address": address, "Platform": "Wolt", "Name": remove_accents(name), "Rating": rating,
                     "Delivery Time": time_str, "Promo": "-", "Status": status,
-                    "Time_Num": time_num, "Is_New": is_new, "Link": link, "Slug": slug
+                    "Time_Num": time_num, "Is_New": False, "Link": link, "Slug": slug
                 }
                 
         if live_ph and live_state is not None:
@@ -545,24 +549,18 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
 
         log_msg(f"[WOLT - {address}] Skinuta lista od {len(results_dict)} restorana. Ulazim u svaki...", log_ph)
 
-        # 3. KORAK: ULAZIMO U SVAKI RESTORAN PREKO CONSUMER API-ja (TAČAN URL SA TVOG SCREENSHOT-a)
+        # 3. ULAZIMO U SVAKI RESTORAN PREKO CONSUMER API-ja DA NADJEMO POPUSTE
         slugs = [v["Slug"] for v in results_dict.values()]
         chunk_size = 5 
-        
-        headers_consumer = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Origin": "https://wolt.com",
-            "Referer": "https://wolt.com/"
-        }
         
         for i in range(0, len(slugs), chunk_size):
             chunk = slugs[i:i+chunk_size]
             tasks = []
             
             for s in chunk:
-                # OVO JE TVOJ URL SA SCREENSHOTA!
+                # OVO JE TVOJ URL ZA CONSUMER API!
                 dynamic_url = f"https://consumer-api.wolt.com/order-xp/web/v1/venue/slug/{s}/dynamic/?lat={lat}&lon={lon}&selected_delivery_method=homedelivery"
-                tasks.append(req.get(dynamic_url, headers=headers_consumer))
+                tasks.append(req.get(dynamic_url)) # Req iz konteksta vuce tvoje Wolt cookie-je
                 
             responses = await asyncio.gather(*tasks, return_exceptions=True)
             
@@ -571,13 +569,42 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
                 if not isinstance(resp, Exception) and resp.ok:
                     try:
                         data = await resp.json()
-                        # Izvlači sav tekst i traži 20% itd.
-                        full_payload = get_all_json_strings(data).lower()
-                        promo_str = extract_promo(full_payload, "", "Wolt")
+                        promo_texts = []
+                        
+                        # Precizno targetiramo venue -> discounts
+                        venue_data = data.get('venue', {})
+                        for discount in venue_data.get('discounts', []):
+                            banner = discount.get('banner', {})
+                            if banner and banner.get('formatted_text'):
+                                promo_texts.append(banner.get('formatted_text'))
+                            badge = discount.get('conditions_item_badge', {})
+                            if badge and badge.get('text'):
+                                promo_texts.append(badge.get('text'))
+                                
+                        # Precizno targetiramo offer_trackers
+                        offer_assistant = venue_data.get('offer_assistant', {})
+                        for tracker in offer_assistant.get('offer_trackers', []):
+                            if tracker.get('title'): promo_texts.append(tracker.get('title'))
+                            if tracker.get('applied_subtitle'): promo_texts.append(tracker.get('applied_subtitle'))
+                            
+                        # Backup opcija: Skenira celo JSON drvo za 'text'
+                        if not promo_texts:
+                            promo_texts = find_promo_strings(data)
+                            
+                        # Spajamo sve to u jedan veliki string i propustamo kroz Regex
+                        combined_text = " \n ".join(promo_texts)
+                        promo_str = extract_promo(combined_text, "", "Wolt")
                         
                         if promo_str != "-":
                             results_dict[link]["Promo"] = promo_str
-                    except: pass
+                            
+                        if "new" in combined_text.lower() or "novo" in combined_text.lower():
+                            results_dict[link]["Is_New"] = True
+                            
+                    except Exception as loop_e: 
+                        log_msg(f"Wolt parsiranje greska za {s}: {loop_e}", log_ph)
+                elif not isinstance(resp, Exception):
+                    log_msg(f"Wolt api blokirao restoran {s}. Status: {resp.status}", log_ph)
             
             await asyncio.sleep(0.5)
             
