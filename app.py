@@ -573,76 +573,102 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
         
         page = await context_wolt.new_page()
         await page.goto("https://wolt.com/sr/srb")
-        await asyncio.sleep(2) 
-        
-        wolt_data = await page.evaluate(f"""async () => {{
-            try {{
-                let res = await fetch("https://restaurant-api.wolt.com/v1/pages/restaurants?lat={lat}&lon={lon}");
-                if (!res.ok) return null;
-                return await res.json();
-            }} catch(e) {{ return null; }}
-        }}""")
-        
-        if not wolt_data:
-            await asyncio.sleep(1)
-            wolt_data = await page.evaluate(f"""async () => {{
+        await asyncio.sleep(2)
+
+        # Paginovano učitavanje SVIH restorana iz feed API-ja
+        # Wolt vraća max ~20-30 po stranici, koristimo 'skip' parametar da prođemo sve
+        log_msg(f"[WOLT] Učitavam sve restorane (paginacija)...", log_ph)
+        all_items = []
+        skip = 0
+        page_size = 40  # Wolt interno ograničava, ali tražimo što više
+        max_pages = 30  # Sigurnosni limit (30 * 40 = 1200 restorana, više nego dovoljno)
+
+        for _ in range(max_pages):
+            batch = await page.evaluate(f"""async () => {{
                 try {{
-                    let res = await fetch("https://restaurant-api.wolt.com/v1/pages/delivery?lat={lat}&lon={lon}");
-                    if (!res.ok) return null;
-                    return await res.json();
-                }} catch(e) {{ return null; }}
+                    // Probamo oba endpoint-a, noviji /restaurants ima bolju paginaciju
+                    let endpoints = [
+                        "https://restaurant-api.wolt.com/v1/pages/restaurants?lat={lat}&lon={lon}&skip={skip}",
+                        "https://restaurant-api.wolt.com/v1/pages/delivery?lat={lat}&lon={lon}&skip={skip}"
+                    ];
+                    for (let url of endpoints) {{
+                        let res = await fetch(url);
+                        if (res.ok) {{
+                            let d = await res.json();
+                            let items = [];
+                            for (let section of (d.sections || [])) {{
+                                for (let item of (section.items || [])) {{
+                                    if (item.venue) items.push(item);
+                                }}
+                            }}
+                            if (items.length > 0) return items;
+                        }}
+                    }}
+                    return [];
+                }} catch(e) {{ return []; }}
             }}""")
-            
-        if not wolt_data:
+
+            if not batch:
+                break  # Nema više restorana
+
+            all_items.extend(batch)
+            log_msg(f"[WOLT] Stranica {skip//page_size + 1}: +{len(batch)} restorana (ukupno {len(all_items)})", log_ph)
+
+            if len(batch) < 10:
+                break  # Poslednja stranica ima malo stavki, gotovi smo
+
+            skip += page_size
+            await asyncio.sleep(0.3)  # Mala pauza između stranica
+
+        if not all_items:
             log_msg(f"[WOLT ERROR] Wolt je blokirao ili vratio prazan feed.", log_ph)
             return []
-        
-        sections = wolt_data.get("sections", [])
-        for section in sections:
-            for item in section.get("items", []):
-                venue = item.get("venue")
-                if not venue: continue
-                
-                name = venue.get("name")
-                slug = venue.get("slug")
-                if not name or not slug: continue
-                
-                link_target = item.get("link", {}).get("target", "")
-                if link_target.startswith("http"): link = link_target
-                elif link_target.startswith("/"): link = f"https://wolt.com{link_target}"
-                else: link = f"https://wolt.com/sr/srb/{city_slug}/restaurant/{slug}"
-                
-                if link in results_dict: continue
-                
-                status = "Open" if venue.get("online") else "Closed"
-                rating_score = venue.get("rating", {}).get("score")
-                rating = str(rating_score) if rating_score else "-"
-                
-                est_range = venue.get("estimate_range")
-                est_minutes = venue.get("estimate")
-                
-                time_num = np.nan
-                time_str = "-"
-                if est_range:
-                    time_str = f"{est_range} min"
-                    try:
-                        parts = str(est_range).split('-')
-                        time_num = (int(parts[0]) + int(parts[1])) / 2.0
-                    except: pass
-                elif est_minutes:
-                    time_str = f"{est_minutes} min"
-                    time_num = float(est_minutes)
-                    
-                feed_payload = get_all_json_strings(item).lower()
-                is_new = "new" in feed_payload or "novo" in feed_payload or "new!" in feed_payload
 
-                promo_initial = extract_promo(feed_payload, "", "Wolt")
+        log_msg(f"[WOLT] Ukupno učitano {len(all_items)} restorana iz feed-a.", log_ph)
 
-                results_dict[slug] = {
-                    "Address": address, "Platform": "Wolt", "Name": remove_accents(name), "Rating": rating,
-                    "Delivery Time": time_str, "Promo": promo_initial, "Status": status,
-                    "Time_Num": time_num, "Is_New": is_new, "Link": link
-                }
+        for item in all_items:
+            venue = item.get("venue")
+            if not venue: continue
+
+            name = venue.get("name")
+            slug = venue.get("slug")
+            if not name or not slug: continue
+
+            link_target = item.get("link", {}).get("target", "")
+            if link_target.startswith("http"): link = link_target
+            elif link_target.startswith("/"): link = f"https://wolt.com{link_target}"
+            else: link = f"https://wolt.com/sr/srb/{city_slug}/restaurant/{slug}"
+
+            if slug in results_dict: continue  # dedup po slug-u (ispravan kljuc)
+
+            status = "Open" if venue.get("online") else "Closed"
+            rating_score = venue.get("rating", {}).get("score")
+            rating = str(rating_score) if rating_score else "-"
+
+            est_range = venue.get("estimate_range")
+            est_minutes = venue.get("estimate")
+
+            time_num = np.nan
+            time_str = "-"
+            if est_range:
+                time_str = f"{est_range} min"
+                try:
+                    parts = str(est_range).split('-')
+                    time_num = (int(parts[0]) + int(parts[1])) / 2.0
+                except: pass
+            elif est_minutes:
+                time_str = f"{est_minutes} min"
+                time_num = float(est_minutes)
+
+            feed_payload = get_all_json_strings(item).lower()
+            is_new = "new" in feed_payload or "novo" in feed_payload or "new!" in feed_payload
+            promo_initial = extract_promo(feed_payload, "", "Wolt")
+
+            results_dict[slug] = {
+                "Address": address, "Platform": "Wolt", "Name": remove_accents(name), "Rating": rating,
+                "Delivery Time": time_str, "Promo": promo_initial, "Status": status,
+                "Time_Num": time_num, "Is_New": is_new, "Link": link
+            }
                 
         if live_ph and live_state is not None:
             live_state["Wolt"] = len(results_dict)
@@ -654,28 +680,44 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
         js_fetch_promos = """
         async ([slugs, lat, lon]) => {
             let results = {};
-            let concurrencyLimit = 15; // 15 istovremenih upita (veoma brzo ali ne obara server)
+            let concurrencyLimit = 20; // povecano na 20 istovremenih upita
             let i = 0;
+
+            async function fetchWithTimeout(url, timeoutMs) {
+                let controller = new AbortController();
+                let timer = setTimeout(() => controller.abort(), timeoutMs);
+                try {
+                    let res = await fetch(url, { signal: controller.signal });
+                    clearTimeout(timer);
+                    return res;
+                } catch(e) {
+                    clearTimeout(timer);
+                    throw e;
+                }
+            }
             
             async function fetchSlug(slug) {
-                let retries = 2;
+                let retries = 3;
+                let delay = 500;
                 while (retries > 0) {
                     try {
                         let url = `https://consumer-api.wolt.com/order-xp/web/v1/venue/slug/${slug}/dynamic/?lat=${lat}&lon=${lon}&selected_delivery_method=homedelivery`;
-                        let res = await fetch(url);
+                        let res = await fetchWithTimeout(url, 8000); // 8s timeout po zahtevu
                         if (res.ok) {
                             results[slug] = await res.json();
                             return;
                         } else if (res.status === 429) {
-                            await new Promise(r => setTimeout(r, 1000)); // pauza 1s ako nas pecne Rate Limit
+                            await new Promise(r => setTimeout(r, delay));
+                            delay *= 2; // exponential backoff
                             retries--;
                         } else {
                             results[slug] = null;
                             return;
                         }
                     } catch(e) {
-                        results[slug] = null;
-                        return;
+                        retries--;
+                        if (retries > 0) await new Promise(r => setTimeout(r, 300));
+                        else { results[slug] = null; return; }
                     }
                 }
                 results[slug] = null;
