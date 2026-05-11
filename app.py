@@ -358,13 +358,20 @@ def extract_promo(text, html_content, plat):
         promos.append("1+1 Free")
         
     if plat == "Wolt":
-        # Hvata procente (npr. 20% discount)
-        for pm in re.findall(r'(\d{1,3}\s*%\s*[^.\n]*)', clean_text):
-            promos.append(pm.strip())
+        # ODVOJENI FILTER 1: Procenat popusta (npr. "20% discount on selected items")
+        for pm in re.findall(r'(\d{1,3}\s*%)', clean_text):
+            promos.append(f"{pm.strip()} discount")
             
-        # Hvata fiksne iznose (npr. RSD400 off ili 400 din popust)
-        for rsd in re.findall(r'((?:rsd|din)\s*\d+\s*(?:off|popust|iznad|over)[^.\n]*)', clean_text):
-            promos.append(rsd.strip())
+        # ODVOJENI FILTER 2: Fiksni RSD/DIN popusti
+        # Strogo mora da sadrzi rec off, popust, discount ili ustedi - da bi izbegli slucajno vadjenje 50000 sa API-ja
+        rsd_patterns = [
+            r'(?:rsd|din)\s*(\d{2,5})\s*(?:off|popust|discount)',
+            r'(\d{2,5})\s*(?:rsd|din)\s*(?:off|popust|discount)',
+            r'(?:uštedi|save|popust)\s*(\d{2,5})\s*(?:rsd|din)'
+        ]
+        for pat in rsd_patterns:
+            for match in re.findall(pat, clean_numbers):
+                if int(match) > 10: promos.append(f"{match} RSD discount")
                 
     else:
         # Glovo logic
@@ -377,8 +384,7 @@ def extract_promo(text, html_content, plat):
     if "prime" in clean_text: promos.append("Prime")
         
     for a in promos:
-        ac = a.replace("rsd", "RSD ").replace("din", " DIN").strip()
-        ac = ac[0].upper() + ac[1:]
+        ac = a[0].upper() + a[1:]
         if ac not in seen:
             seen.add(ac)
             res.append(f"• {ac}")
@@ -386,6 +392,70 @@ def extract_promo(text, html_content, plat):
     return "\n".join(res) if res else "-"
 
 def normalize_name(name): return re.sub(r'[^\w]', '', str(name).lower())
+
+def extract_wolt_discounts_from_api(data):
+    """
+    Direktno čita 'discounts' array iz Wolt dynamic API odgovora i vraća
+    listu svih akcija kao čitljive stringove (naslov + opis).
+    Ovo je preciznije od regex-a jer čita tačne naslove koje Wolt šalje.
+    """
+    res = []
+    seen = set()
+
+    try:
+        # discounts mogu biti na top nivou ili unutar venue_raw
+        sources = []
+        if isinstance(data, dict):
+            if "discounts" in data:
+                sources.append(data["discounts"])
+            venue_raw = data.get("venue_raw", {})
+            if isinstance(venue_raw, dict) and "discounts" in venue_raw:
+                sources.append(venue_raw["discounts"])
+
+        for discount_list in sources:
+            if not isinstance(discount_list, list):
+                continue
+            for disc in discount_list:
+                if not isinstance(disc, dict):
+                    continue
+
+                # Pokušavamo da nađemo naslov – može biti na više mesta
+                title = ""
+                # 1. description.title (standardno)
+                desc = disc.get("description", {})
+                if isinstance(desc, dict):
+                    title = desc.get("title", "") or ""
+                # 2. banner.formatted_text ako nema description.title
+                if not title:
+                    banner = disc.get("banner", {})
+                    if isinstance(banner, dict):
+                        title = banner.get("formatted_text", "") or ""
+                # 3. condition_item_badge.text kao fallback
+                if not title:
+                    cib = disc.get("condition_item_badge", {})
+                    if isinstance(cib, dict):
+                        title = cib.get("text", "") or ""
+
+                title = str(title).strip()
+                if not title or title.lower() in seen:
+                    continue
+
+                # Preskačemo interne Wolt+ / Prime kampanje koje nisu prave akcije
+                lower_title = title.lower()
+                if any(x in lower_title for x in ["wolt+", "prime", "loyalty"]):
+                    res.append(f"• Wolt+")
+                    seen.add("wolt+")
+                    continue
+
+                seen.add(title.lower())
+                # Skraćujemo preduge naslove na 80 znakova
+                display = title if len(title) <= 80 else title[:77] + "..."
+                res.append(f"• {display}")
+
+    except Exception:
+        pass
+
+    return "\n".join(res) if res else None
 
 # ---------------- SPARTAN MODE: FAKE PIXEL ----------------
 TINY_PNG = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
@@ -634,40 +704,51 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
         
         for slug, data in all_promo_data.items():
             if data:
-                # 1. Hvatanje SVIH popusta iz banner sekcije
-                all_banners = []
-                venue_data = data.get("venue_raw", {})
-                discounts_list = venue_data.get("discounts", [])
-                
-                for disc in discounts_list:
-                    banner_text = disc.get("banner", {}).get("formatted_text")
-                    if banner_text:
-                        all_banners.append(f"• {banner_text}")
-
-                # 2. Provera "Novo" statusa (gledamo tagove i json)
-                is_new_status = False
-                tags = venue_data.get("tags", [])
-                if "new-restaurant" in tags or data.get("is_new") is True:
-                    is_new_status = True
-
                 full_payload = get_all_json_strings(data).lower()
-                promo_new = extract_promo(full_payload, "", "Wolt")
-                
-                # Spajamo staru (ako ima), novu tekstualnu akciju, i bannere
+
+                # KORAK 1: Direktno čitanje iz 'discounts' arraya (precizni naslovi akcija)
+                api_promos = extract_wolt_discounts_from_api(data)
+
+                # KORAK 2: Stari regex kao dopuna (hvata stvari koje nisu u discounts)
+                promo_regex = extract_promo(full_payload, "", "Wolt")
+
+                # KORAK 3: Spajamo sve - API naslovi imaju prioritet, regex je fallback
                 existing_promo = results_dict[slug]["Promo"]
-                final_promos = set(all_banners)
-                
-                if existing_promo != "-":
+                final_promos_ordered = []
+                seen_promos = set()
+
+                # Prvo dodajemo API naslove (najpreciznije)
+                if api_promos and api_promos != "-":
+                    for p in api_promos.split('\n'):
+                        p = p.strip()
+                        if p and p not in seen_promos:
+                            seen_promos.add(p)
+                            final_promos_ordered.append(p)
+
+                # Zatim regex promo (samo ako API nije već uhvatio nešto slično)
+                if promo_regex and promo_regex != "-":
+                    for p in promo_regex.split('\n'):
+                        p = p.strip()
+                        if p and p not in seen_promos:
+                            # Preskačemo % discount iz regex-a ako već imamo konkretan API naslov
+                            # (jer API daje bolji opis)
+                            if api_promos and re.search(r'discount', p, re.IGNORECASE):
+                                continue
+                            seen_promos.add(p)
+                            final_promos_ordered.append(p)
+
+                # Stari promo iz feed-a (ako ima nešto što nismo uhvatili)
+                if existing_promo and existing_promo != "-":
                     for p in existing_promo.split('\n'):
-                        if p.strip(): final_promos.add(p.strip())
-                if promo_new != "-":
-                    for p in promo_new.split('\n'):
-                        if p.strip(): final_promos.add(p.strip())
-                        
-                if final_promos:
-                    results_dict[slug]["Promo"] = "\n".join(sorted(list(final_promos)))
-                    
-                if is_new_status or "new" in full_payload or "novo" in full_payload:
+                        p = p.strip()
+                        if p and p not in seen_promos:
+                            seen_promos.add(p)
+                            final_promos_ordered.append(p)
+
+                if final_promos_ordered:
+                    results_dict[slug]["Promo"] = "\n".join(final_promos_ordered)
+
+                if "new" in full_payload or "novo" in full_payload:
                     results_dict[slug]["Is_New"] = True
 
         # Čišćenje slug-ova iz tabele
