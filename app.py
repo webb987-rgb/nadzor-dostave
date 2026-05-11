@@ -699,28 +699,66 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
             async function fetchSlug(slug) {
                 let retries = 3;
                 let delay = 500;
+                let dynamicData = null;
+
+                // --- KORAK A: Dynamic endpoint (venue-level discounts) ---
                 while (retries > 0) {
                     try {
                         let url = `https://consumer-api.wolt.com/order-xp/web/v1/venue/slug/${slug}/dynamic/?lat=${lat}&lon=${lon}&selected_delivery_method=homedelivery`;
-                        let res = await fetchWithTimeout(url, 8000); // 8s timeout po zahtevu
+                        let res = await fetchWithTimeout(url, 8000);
                         if (res.ok) {
-                            results[slug] = await res.json();
-                            return;
+                            dynamicData = await res.json();
+                            break;
                         } else if (res.status === 429) {
                             await new Promise(r => setTimeout(r, delay));
-                            delay *= 2; // exponential backoff
+                            delay *= 2;
                             retries--;
-                        } else {
-                            results[slug] = null;
-                            return;
-                        }
+                        } else { break; }
                     } catch(e) {
                         retries--;
                         if (retries > 0) await new Promise(r => setTimeout(r, 300));
-                        else { results[slug] = null; return; }
                     }
                 }
-                results[slug] = null;
+
+                // --- KORAK B: Menu endpoint (item-level discounts - precrtane cene) ---
+                // Ovo hvata restorane koji imaju popuste na PROIZVODE ali ne i na venue nivou
+                let itemDiscountInfo = { has_item_discounts: false, item_discount_pct: null };
+                try {
+                    let menuUrl = `https://restaurant-api.wolt.com/v4/venues/slug/${slug}/menu?unit_prices=true`;
+                    let menuRes = await fetchWithTimeout(menuUrl, 8000);
+                    if (menuRes.ok) {
+                        let menuData = await menuRes.json();
+                        // Prolazimo kroz sve kategorije i proizvode
+                        let categories = menuData.categories || [];
+                        let discountedItems = 0;
+                        let totalItems = 0;
+                        let maxDiscountPct = 0;
+                        for (let cat of categories) {
+                            for (let item of (cat.items || [])) {
+                                totalItems++;
+                                // original_price postoji i veci je od price = precrtana cena = popust
+                                let price = item.baseprice || item.price || 0;
+                                let origPrice = item.original_price || 0;
+                                if (origPrice > 0 && origPrice > price && price > 0) {
+                                    discountedItems++;
+                                    let pct = Math.round((1 - price / origPrice) * 100);
+                                    if (pct > maxDiscountPct) maxDiscountPct = pct;
+                                }
+                            }
+                        }
+                        if (discountedItems > 0) {
+                            itemDiscountInfo.has_item_discounts = true;
+                            itemDiscountInfo.discounted_items = discountedItems;
+                            itemDiscountInfo.total_items = totalItems;
+                            itemDiscountInfo.max_discount_pct = maxDiscountPct;
+                        }
+                    }
+                } catch(e) { /* menu fetch neobavezan, nastavljamo */ }
+
+                results[slug] = {
+                    dynamic: dynamicData,
+                    item_discount: itemDiscountInfo
+                };
             }
 
             let workers = [];
@@ -744,54 +782,52 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
         # SVE restorane šaljemo odjednom u Browser. JavaScript će ih sam pametno isprocesuirati!
         all_promo_data = await page.evaluate(js_fetch_promos, [slugs, lat, lon])
         
-        for slug, data in all_promo_data.items():
-            if data:
-                full_payload = get_all_json_strings(data).lower()
+        for slug, combined in all_promo_data.items():
+            if not combined:
+                continue
 
-                # KORAK 1: Direktno čitanje iz 'discounts' arraya (precizni naslovi akcija)
-                api_promos = extract_wolt_discounts_from_api(data)
+            data = combined.get("dynamic") if isinstance(combined, dict) else combined
+            item_discount = combined.get("item_discount", {}) if isinstance(combined, dict) else {}
 
-                # KORAK 2: Stari regex kao dopuna (hvata stvari koje nisu u discounts)
-                promo_regex = extract_promo(full_payload, "", "Wolt")
+            full_payload = get_all_json_strings(data).lower() if data else ""
 
-                # KORAK 3: Spajamo sve - API naslovi imaju prioritet, regex je fallback
-                existing_promo = results_dict[slug]["Promo"]
-                final_promos_ordered = []
-                seen_promos = set()
+            # KORAK 1: Direktno čitanje iz 'discounts' arraya (venue-level)
+            api_promos = extract_wolt_discounts_from_api(data) if data else None
 
-                # Prvo dodajemo API naslove (najpreciznije)
-                if api_promos and api_promos != "-":
-                    for p in api_promos.split('\n'):
-                        p = p.strip()
-                        if p and p not in seen_promos:
-                            seen_promos.add(p)
-                            final_promos_ordered.append(p)
+            # KORAK 2: Stari regex kao dopuna
+            promo_regex = extract_promo(full_payload, "", "Wolt") if full_payload else "-"
 
-                # Zatim regex promo (samo ako API nije već uhvatio nešto slično)
-                if promo_regex and promo_regex != "-":
-                    for p in promo_regex.split('\n'):
-                        p = p.strip()
-                        if p and p not in seen_promos:
-                            # Preskačemo % discount iz regex-a ako već imamo konkretan API naslov
-                            # (jer API daje bolji opis)
-                            if api_promos and re.search(r'discount', p, re.IGNORECASE):
-                                continue
-                            seen_promos.add(p)
-                            final_promos_ordered.append(p)
+            # KORAK 3: Item-level popusti (precrtane cene u meniju)
+            item_promo = None
+            if item_discount and item_discount.get("has_item_discounts"):
+                n = item_discount.get("discounted_items", 0)
+                pct = item_discount.get("max_discount_pct", 0)
+                if pct > 0:
+                    item_promo = f"• Popust do {pct}% na {n} proizvoda u meniju"
+                else:
+                    item_promo = f"• Popust na {n} proizvoda u meniju"
 
-                # Stari promo iz feed-a (ako ima nešto što nismo uhvatili)
-                if existing_promo and existing_promo != "-":
-                    for p in existing_promo.split('\n'):
-                        p = p.strip()
-                        if p and p not in seen_promos:
-                            seen_promos.add(p)
-                            final_promos_ordered.append(p)
+            # KORAK 4: Spajamo sve - API naslovi imaju prioritet
+            existing_promo = results_dict[slug]["Promo"]
+            final_promos_ordered = []
+            seen_promos = set()
 
-                if final_promos_ordered:
-                    results_dict[slug]["Promo"] = "\n".join(final_promos_ordered)
+            for source in [api_promos, item_promo, promo_regex if not api_promos else None, existing_promo]:
+                if not source or source == "-":
+                    continue
+                for p in source.split('\n'):
+                    p = p.strip()
+                    if p and p not in seen_promos:
+                        if api_promos and source == promo_regex and re.search(r'\d+\s*%\s*discount', p, re.IGNORECASE):
+                            continue  # preskoci genericki regex % ako imamo API naslov
+                        seen_promos.add(p)
+                        final_promos_ordered.append(p)
 
-                if "new" in full_payload or "novo" in full_payload:
-                    results_dict[slug]["Is_New"] = True
+            if final_promos_ordered:
+                results_dict[slug]["Promo"] = "\n".join(final_promos_ordered)
+
+            if data and ("new" in full_payload or "novo" in full_payload):
+                results_dict[slug]["Is_New"] = True
 
         # Čišćenje slug-ova iz tabele
         for v in results_dict.values():
