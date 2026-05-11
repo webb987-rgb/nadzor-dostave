@@ -676,6 +676,71 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
 
         log_msg(f"[WOLT - {address}] Skinuto {len(results_dict)} restorana. Pokrećem munjeviti JS requester za popuste...", log_ph)
 
+        # DEBUG KORAK: Za prvi slug testiraj sve moguće menu endpoint-e i logiraj strukturu
+        debug_slug = slugs[0] if slugs else None
+        if debug_slug:
+            debug_result = await page.evaluate(f"""async () => {{
+                let slug = "{debug_slug}";
+                let lat = "{lat}";
+                let lon = "{lon}";
+                let report = [];
+
+                let endpoints = [
+                    `https://restaurant-api.wolt.com/v4/venues/slug/${{slug}}/menu?unit_prices=true`,
+                    `https://restaurant-api.wolt.com/v4/venues/slug/${{slug}}/menu`,
+                    `https://consumer-api.wolt.com/consumer-api/consumer-assortment/v2/venues/slug/${{slug}}/categories?unit_prices=true`,
+                    `https://consumer-api.wolt.com/consumer-api/consumer-assortment/v2/venues/slug/${{slug}}/categories`,
+                    `https://consumer-api.wolt.com/order-xp/web/v1/venue/slug/${{slug}}/menu`,
+                    `https://consumer-api.wolt.com/order-xp/web/v1/venue/slug/${{slug}}/menu?unit_prices=true`,
+                    `https://restaurant-api.wolt.com/v1/pages/restaurants?lat=${{lat}}&lon=${{lon}}&venue_slug=${{slug}}`,
+                ];
+
+                for (let url of endpoints) {{
+                    try {{
+                        let res = await fetch(url);
+                        let status = res.status;
+                        if (res.ok) {{
+                            let data = await res.json();
+                            let keys = Object.keys(data);
+                            // Pokušaj da nađeš item sa original_price
+                            let sampleItem = null;
+                            let allItems = [];
+                            // Skupljamo sve iteme iz svih mogucih struktura
+                            if (data.categories) data.categories.forEach(c => (c.items||[]).forEach(i => allItems.push(i)));
+                            if (data.items) (Array.isArray(data.items) ? data.items : []).forEach(i => allItems.push(i));
+                            if (data.results) data.results.forEach(r => (r.items||[]).forEach(i => allItems.push(i)));
+                            // Nadji item sa original_price
+                            sampleItem = allItems.find(i => i.original_price || i.baseprice) || allItems[0] || null;
+                            report.push({{
+                                url: url, status: status, 
+                                top_keys: keys.slice(0,15),
+                                item_count: allItems.length,
+                                sample_item_keys: sampleItem ? Object.keys(sampleItem).slice(0,20) : [],
+                                sample_item: sampleItem ? JSON.stringify(sampleItem).slice(0, 500) : null
+                            }});
+                        }} else {{
+                            report.push({{ url: url, status: status }});
+                        }}
+                    }} catch(e) {{
+                        report.push({{ url: url, error: e.toString() }});
+                    }}
+                }}
+                return report;
+            }}""")
+            log_msg(f"[WOLT DEBUG] Menu API probe za slug '{debug_slug}':", log_ph)
+            for entry in (debug_result or []):
+                status = entry.get('status', 'err')
+                url = entry.get('url', '')
+                short_url = url.split('wolt.com')[-1][:70]
+                if entry.get('item_count', 0) > 0:
+                    log_msg(f"  ✅ [{status}] {short_url} -> {entry['item_count']} items, keys: {entry.get('top_keys')}", log_ph)
+                    log_msg(f"     Item keys: {entry.get('sample_item_keys')}", log_ph)
+                    log_msg(f"     Sample: {entry.get('sample_item', '')[:200]}", log_ph)
+                elif status == 200:
+                    log_msg(f"  ⚠️  [{status}] {short_url} -> 0 items, top keys: {entry.get('top_keys')}", log_ph)
+                else:
+                    log_msg(f"  ❌ [{status}] {short_url}", log_ph)
+
         # 3. KORAK: MUNJEVITI KONKURENTNI JS POZIVI (Ovo smanjuje vreme sa 40 na ~4 sekunde)
         js_fetch_promos = """
         async ([slugs, lat, lon]) => {
