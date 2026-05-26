@@ -3,6 +3,6 @@ pandas
 numpy
 matplotlib
 plotly
-playwright
+playwright==1.40.0
 nest_asyncio
 reportlab
