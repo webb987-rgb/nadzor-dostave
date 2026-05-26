@@ -7,7 +7,7 @@ import re
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import plotly.express as px          
+import plotly.express as px         
 import plotly.graph_objects as go    
 import random
 import urllib.parse
@@ -83,10 +83,12 @@ st.markdown("""
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-@st.cache_resource
+# IZMENJENA FUNKCIJA - SADA POVLAČI I ZAVISNOSTI ZA LINUX SERVER
 def install_playwright():
-    import os
-    os.system("playwright install chromium")
+    try:
+        subprocess.run(["playwright", "install", "chromium", "--with-deps"], check=True)
+    except Exception:
+        pass
 
 install_playwright()
 
@@ -736,7 +738,7 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
                         for (let cat of categories) {
                             for (let item of (cat.items || [])) {
                                 totalItems++;
-                                // original_price postoji i veci je od price = precrtana cena = popust
+                                // original_price exists and is larger than price = strikeout price = discount
                                 let price = item.baseprice || item.price || 0;
                                 let origPrice = item.original_price || 0;
                                 if (origPrice > 0 && origPrice > price && price > 0) {
@@ -753,7 +755,7 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
                             itemDiscountInfo.max_discount_pct = maxDiscountPct;
                         }
                     }
-                } catch(e) { /* menu fetch neobavezan, nastavljamo */ }
+                } catch(e) { /* menu fetch non-mandatory, continuing */ }
 
                 results[slug] = {
                     dynamic: dynamicData,
@@ -819,7 +821,7 @@ async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live
                     p = p.strip()
                     if p and p not in seen_promos:
                         if api_promos and source == promo_regex and re.search(r'\d+\s*%\s*discount', p, re.IGNORECASE):
-                            continue  # preskoci genericki regex % ako imamo API naslov
+                            continue  # skip generic regex % if we have API title
                         seen_promos.add(p)
                         final_promos_ordered.append(p)
 
@@ -1352,7 +1354,7 @@ if st.session_state.is_running or st.session_state.loaded_history:
             while rem > 0:
                 countdown_ph.info(f"⏳ Next auto-scan in: **{rem//60:02d}:{rem%60:02d}**")
                 time.sleep(1); rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
-            st.rerun()
+                st.rerun()
         else: st.sidebar.success("✅ Scan completed. Click 'Start' for a new scan.")
         
 else: 
