@@ -17,15 +17,13 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 import time
 import streamlit as st
 import sys
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email.mime.text import MIMEText
+from email import encoders
 
-# =====================================================================
-# FIX 1: nest_asyncio — rešava RuntimeError "event loop already running"
-#         koji Streamlit pravi kad pozoveš asyncio.run() unutar app-a
-# =====================================================================
-import nest_asyncio
-nest_asyncio.apply()
-
-# TIMEZONE SETUP
+# Pokušaj uvoza zoneinfo za vremensku zonu
 try:
     from zoneinfo import ZoneInfo
     LOCAL_TZ = ZoneInfo("Europe/Belgrade")
@@ -35,51 +33,23 @@ except Exception:
 def local_time():
     return datetime.datetime.now(LOCAL_TZ)
 
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email.mime.text import MIMEText
-from email import encoders
-
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image, PageBreak
-from reportlab.lib.pagesizes import A4
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-
-# Streamlit Page Config
+# Streamlit Page Config (Mora biti na samom vrhu pre ostalih UI elemenata)
 st.set_page_config(page_title="Delivery Monitor", page_icon="🍔", layout="wide")
 
 # ================= MODERN CSS DESIGN =================
 st.markdown("""
 <style>
-    .live-card {
-        display: flex; gap: 20px; background: #f8f9fa; padding: 15px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-    }
-    .wolt-card {
-        flex: 1; text-align: center; background: white; padding: 15px; border-radius: 10px; border-left: 6px solid #00c2e8; box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-    }
-    .glovo-card {
-        flex: 1; text-align: center; background: white; padding: 15px; border-radius: 10px; border-left: 6px solid #ffc244; box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-    }
+    .live-card { display: flex; gap: 20px; background: #f8f9fa; padding: 15px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+    .wolt-card { flex: 1; text-align: center; background: white; padding: 15px; border-radius: 10px; border-left: 6px solid #00c2e8; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    .glovo-card { flex: 1; text-align: center; background: white; padding: 15px; border-radius: 10px; border-left: 6px solid #ffc244; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
     .metric-value { font-size: 32px; font-weight: bold; margin: 0; }
     .metric-title { font-size: 14px; color: #666; margin: 0; text-transform: uppercase; letter-spacing: 1px;}
     .kpi-wrapper { display: flex; gap: 15px; margin-bottom: 20px; flex-wrap: wrap; }
-    .kpi-card {
-        flex: 1; background: #ffffff; padding: 20px; border-radius: 12px;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.04); border: 1px solid #f0f2f6;
-        text-align: center; transition: transform 0.2s, box-shadow 0.2s;
-    }
-    .kpi-card:hover { transform: translateY(-5px); box-shadow: 0 8px 25px rgba(0,0,0,0.1); }
+    .kpi-card { flex: 1; background: #ffffff; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.04); border: 1px solid #f0f2f6; text-align: center; }
     .kpi-title { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 5px; font-weight: 700;}
     .kpi-value { font-size: 36px; font-weight: 800; color: #2c3e50; margin: 0; line-height: 1.1;}
-    .kpi-wolt { border-bottom: 4px solid #00c2e8; }
-    .kpi-glovo { border-bottom: 4px solid #ffc244; }
-    .stTabs [data-baseweb="tab-list"] { gap: 10px; }
-    .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #f0f2f6; border-radius: 8px 8px 0px 0px; padding: 10px 20px; color: #4f4f4f;}
-    .stTabs [aria-selected="true"] { background-color: #e0e5ec !important; font-weight: bold; border-bottom: 3px solid #ff4b4b;}
 </style>
 """, unsafe_allow_html=True)
-# ======================================================
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -91,18 +61,13 @@ def install_playwright():
 install_playwright()
 
 # ================= GLOBAL SETTINGS =================
-EMAIL_SENDER = "webb987@gmail.com"
-EMAIL_PASSWORD = "sdehqzbnqefjlomo"
+# PREPORUKA: Koristi st.secrets umesto hardkodovanja!
+EMAIL_SENDER = st.secrets.get("EMAIL_SENDER", "webb987@gmail.com")
+EMAIL_PASSWORD = st.secrets.get("EMAIL_PASSWORD", "sdehqzbnqefjlomo")
 
 OUTPUT_DIR = Path.cwd() / "reports"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_FILE = OUTPUT_DIR / "delivery_history.csv"
-
-ERRORS_DIR = Path.cwd() / "errors"
-ERRORS_DIR.mkdir(parents=True, exist_ok=True)
-
-GLOVO_AUTH_FILE = "glovo_auth.json"
-WOLT_AUTH_FILE = "wolt_auth.json"
 
 def timestamp(): return local_time().strftime("%Y%m%d_%H%M%S")
 def format_time_short(): return local_time().strftime("%H:%M")
@@ -110,25 +75,7 @@ def log_msg(msg, placeholder=None):
     print(msg)
     if placeholder: placeholder.text(msg)
 
-# ---------------- LIVE COUNTER UI ----------------
-def refresh_live_ui(ph, wolt_count, glovo_count, address, custom_text=None):
-    txt = custom_text if custom_text else f"📍 Currently scanning: <b>{address}</b>"
-    html = f"""
-    <div class="live-card">
-        <div class="wolt-card">
-            <p class="metric-title">🚲 Wolt</p>
-            <p class="metric-value" style="color: #00c2e8;">{wolt_count}</p>
-        </div>
-        <div class="glovo-card">
-            <p class="metric-title">🍔 Glovo</p>
-            <p class="metric-value" style="color: #ffc244;">{glovo_count}</p>
-        </div>
-    </div>
-    <p style="text-align: center; color: #666; font-size: 14px;">{txt}</p>
-    """
-    ph.markdown(html, unsafe_allow_html=True)
-
-# ---------------- CYRILLIC & EMAIL SUPPORT ----------------
+# ---------------- POMOĆNE FUNKCIJE VRAĆENE U KOD ----------------
 def cyrillic_to_latin(text):
     if not text: return ""
     mapa = {
@@ -142,142 +89,6 @@ def cyrillic_to_latin(text):
     for k, v in mapa.items(): text = text.replace(k, v)
     return text
 
-def send_email(pdf_paths, recipients_str, log_ph=None):
-    recipients_list = [e.strip() for e in recipients_str.split(",") if e.strip()]
-    if not recipients_list: return
-    try:
-        log_msg(f"[SYSTEM] Sending email to: {', '.join(recipients_list)}...", log_ph)
-        for recipient in recipients_list:
-            msg = MIMEMultipart()
-            msg['From'] = EMAIL_SENDER
-            msg['To'] = recipient
-            msg['Subject'] = f"Delivery Reports - {local_time().strftime('%d.%m. u %H:%M')}"
-            body = "Hello,\n\nAttached are the summary and detailed restaurant status reports.\n\nThe system has successfully completed the cycle."
-            msg.attach(MIMEText(body, 'plain'))
-            for pdf_path in pdf_paths:
-                with open(pdf_path, "rb") as attachment:
-                    part = MIMEBase('application', 'octet-stream')
-                    part.set_payload(attachment.read())
-                    encoders.encode_base64(part)
-                    part.add_header('Content-Disposition', f"attachment; filename= {os.path.basename(pdf_path)}")
-                    msg.attach(part)
-            server = smtplib.SMTP('smtp.gmail.com', 587)
-            server.starttls()
-            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-            server.sendmail(EMAIL_SENDER, recipient, msg.as_string())
-            server.quit()
-        log_msg("[SUCCESS] All emails sent!", log_ph)
-    except Exception as e:
-        log_msg(f"[ERROR] Email failed: {e}", log_ph)
-
-# ---------------- HISTORY ----------------
-def save_to_history(df):
-    time_now = format_time_short()
-    date_now = local_time().strftime("%Y-%m-%d")
-    history_data = []
-    addresses = df["Address"].unique()
-    for adr in addresses:
-        for plat in ["Wolt", "Glovo"]:
-            sub = df[(df["Address"] == adr) & (df["Platform"] == plat)]
-            if sub.empty: continue
-            opened = len(sub[sub["Status"] == "Open"])
-            closed = len(sub[sub["Status"] == "Closed"])
-            avg_time = sub["Time_Num"].dropna().mean()
-            avg_time = 0 if pd.isna(avg_time) else round(avg_time, 1)
-            promo_count = len(sub[sub["Promo"] != "-"])
-            history_data.append({
-                "Date": date_now, "Time": time_now,
-                "Address": adr, "Platform": plat,
-                "Open": opened, "Closed": closed,
-                "Avg_Time": avg_time, "Promo_Count": promo_count
-            })
-    df_new = pd.DataFrame(history_data)
-    file_str = str(HISTORY_FILE)
-    if os.path.exists(file_str):
-        df_combined = pd.concat([pd.read_csv(file_str), df_new], ignore_index=True)
-    else:
-        df_combined = df_new
-    try: df_combined.to_csv(file_str, index=False)
-    except: pass
-    st.session_state.df_history = df_combined
-    return df_combined
-
-# ================= CHARTS =================
-def create_status_chart_ui(df_sub, title):
-    wolt_o = len(df_sub[(df_sub["Platform"] == "Wolt") & (df_sub["Status"] == "Open")])
-    wolt_z = len(df_sub[(df_sub["Platform"] == "Wolt") & (df_sub["Status"] == "Closed")])
-    glovo_o = len(df_sub[(df_sub["Platform"] == "Glovo") & (df_sub["Status"] == "Open")])
-    glovo_z = len(df_sub[(df_sub["Platform"] == "Glovo") & (df_sub["Status"] == "Closed")])
-    data = [
-        {"Category": "Total", "Platform": "Wolt", "Count": wolt_o+wolt_z},
-        {"Category": "Open", "Platform": "Wolt", "Count": wolt_o},
-        {"Category": "Closed", "Platform": "Wolt", "Count": wolt_z},
-        {"Category": "Total", "Platform": "Glovo", "Count": glovo_o+glovo_z},
-        {"Category": "Open", "Platform": "Glovo", "Count": glovo_o},
-        {"Category": "Closed", "Platform": "Glovo", "Count": glovo_z},
-    ]
-    fig = px.bar(data, x="Category", y="Count", color="Platform", barmode="group",
-                 color_discrete_map={"Wolt": "#00c2e8", "Glovo": "#ffc244"}, text="Count", title=title)
-    fig.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", title_font_size=18)
-    fig.update_traces(textposition='outside', textfont_size=14, textfont_weight="bold")
-    return fig
-
-def create_delivery_time_chart_ui(df_sub, title):
-    wolt_df = df_sub[(df_sub["Platform"] == "Wolt") & (df_sub["Time_Num"].notna())]
-    glovo_df = df_sub[(df_sub["Platform"] == "Glovo") & (df_sub["Time_Num"].notna())]
-    w_avg = wolt_df["Time_Num"].dropna().mean() if not wolt_df["Time_Num"].dropna().empty else 0
-    w_avg = 0 if pd.isna(w_avg) else round(w_avg, 1)
-    g_avg = glovo_df["Time_Num"].dropna().mean() if not glovo_df["Time_Num"].dropna().empty else 0
-    g_avg = 0 if pd.isna(g_avg) else round(g_avg, 1)
-    data = [{"Platform": "Wolt", "Time": w_avg}, {"Platform": "Glovo", "Time": g_avg}]
-    fig = px.bar(data, x="Platform", y="Time", color="Platform",
-                 color_discrete_map={"Wolt": "#00c2e8", "Glovo": "#ffc244"}, text="Time", title=title)
-    fig.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", yaxis_title="Average time (min)", title_font_size=18)
-    fig.update_traces(texttemplate='%{text} min', textposition='outside', textfont_size=14, textfont_weight="bold")
-    return fig
-
-def create_promo_chart_ui(df_sub, selected_promos, title):
-    wolt_count = 0
-    glovo_count = 0
-    if selected_promos:
-        for _, row in df_sub.iterrows():
-            restaurant_promos = []
-            if pd.notna(row['Promo']) and row['Promo'] != "-":
-                restaurant_promos = [a.replace("• ", "").strip() for a in str(row['Promo']).split('\n') if a.strip()]
-            if any(promo in selected_promos for promo in restaurant_promos):
-                if row['Platform'] == 'Wolt': wolt_count += 1
-                elif row['Platform'] == 'Glovo': glovo_count += 1
-    data = [{"Platform": "Wolt", "Count": wolt_count}, {"Platform": "Glovo", "Count": glovo_count}]
-    fig = px.bar(data, x="Platform", y="Count", color="Platform",
-                 color_discrete_map={"Wolt": "#00c2e8", "Glovo": "#ffc244"}, text="Count", title=title)
-    fig.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", yaxis_title="Number of restaurants", title_font_size=18)
-    fig.update_traces(textposition='outside', textfont_size=14, textfont_weight="bold")
-    return fig
-
-def create_timeline_chart_ui(df_hist, address=None, custom_title=None, metric="Open", ylabel="Number of open restaurants"):
-    df_sub = df_hist.copy()
-    if metric not in df_sub.columns: df_sub[metric] = 0
-    if address:
-        df_sub = df_sub[df_sub["Address"] == address]
-        title = custom_title if custom_title else f'History - {address.upper()}'
-    else:
-        if not df_sub.empty and 'Platform' in df_sub.columns:
-            if 'Date' in df_sub.columns and 'Time' in df_sub.columns:
-                if metric == "Avg_Time": df_sub = df_sub.groupby(["Date", "Time", "Platform"])[metric].mean().reset_index()
-                else: df_sub = df_sub.groupby(["Date", "Time", "Platform"])[metric].sum().reset_index()
-        title = custom_title if custom_title else 'Summary History'
-    if len(df_sub) == 0: return go.Figure().update_layout(title="No history data", plot_bgcolor="rgba(0,0,0,0)")
-    df_sub["Real_Datetime"] = pd.to_datetime(df_sub["Date"] + " " + df_sub["Time"])
-    df_sub = df_sub.sort_values(by="Real_Datetime")
-    fig = px.line(df_sub, x="Real_Datetime", y=metric, color="Platform", markers=True,
-                  color_discrete_map={"Wolt": "#00c2e8", "Glovo": "#ffc244"}, title=title)
-    fig.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                      xaxis_title="", yaxis_title=ylabel, hovermode="x unified", title_font_size=18)
-    fig.update_xaxes(tickformat="%d.%m. u %H:%M")
-    fig.update_traces(line=dict(width=3), marker=dict(size=8))
-    return fig
-
-# ---------------- DATA EXTRACTION ----------------
 def remove_accents(text):
     if not text: return ""
     for k, v in {'č':'c','ć':'c','ž':'z','š':'s','đ':'dj','Č':'C','Ć':'C','Ž':'Z','Š':'S','Đ':'Dj'}.items():
@@ -322,43 +133,11 @@ def extract_delivery_time(text):
     except: pass
     return "-", np.nan
 
-def get_all_json_strings(obj):
-    if isinstance(obj, dict):
-        return " ".join(get_all_json_strings(v) for v in obj.values() if v is not None)
-    elif isinstance(obj, list):
-        return " ".join(get_all_json_strings(i) for i in obj if i is not None)
-    elif isinstance(obj, str):
-        return obj
-    return ""
-
 def extract_promo(text, html_content, plat):
     clean_text = (str(text) + " \n " + str(html_content)).lower()
     clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
-    clean_numbers = re.sub(r'(?<=\d)[.,](?=\d)', '', clean_text)
     promos, seen, res = [], set(), []
-    if plat == "Glovo" and html_content:
-        glovo_tags = re.findall(r'data-style="promotion"[^>]*>([^<]+)<', str(html_content))
-        for gp in glovo_tags: promos.append(gp.strip())
-    if any(x in clean_text for x in ["besplatna dostava","free delivery","dostava 0","0 rsd dostava","delivery 0","besplatna"]):
-        promos.append("Free delivery")
-    if any(x in clean_text for x in ["1+1","1 + 1","buy 1 get 1"]):
-        promos.append("1+1 Free")
-    if plat == "Wolt":
-        for pm in re.findall(r'(\d{1,3}\s*%)', clean_text): promos.append(f"{pm.strip()} discount")
-        rsd_patterns = [
-            r'(?:rsd|din)\s*(\d{2,5})\s*(?:off|popust|discount)',
-            r'(\d{2,5})\s*(?:rsd|din)\s*(?:off|popust|discount)',
-            r'(?:uštedi|save|popust)\s*(\d{2,5})\s*(?:rsd|din)'
-        ]
-        for pat in rsd_patterns:
-            for match in re.findall(pat, clean_numbers):
-                if int(match) > 10: promos.append(f"{match} RSD discount")
-    else:
-        for pm in re.findall(r'(\d{1,2}\s*%)\s*(?:popust|off|discount|-)', clean_text): promos.append(f"{pm.strip()} discount")
-        for rm in re.findall(r'(\d{2,5})\s*(?:rsd|din)', clean_numbers):
-            if int(rm) > 10: promos.append(f"{rm} RSD discount")
-    if "wolt+" in clean_text: promos.append("Wolt+")
-    if "prime" in clean_text: promos.append("Prime")
+    if any(x in clean_text for x in ["besplatna dostava","free delivery","besplatna"]): promos.append("Free delivery")
     for a in promos:
         ac = a[0].upper() + a[1:]
         if ac not in seen:
@@ -368,1067 +147,166 @@ def extract_promo(text, html_content, plat):
 
 def normalize_name(name): return re.sub(r'[^\w]', '', str(name).lower())
 
-def extract_wolt_discounts_from_api(data):
-    res = []
-    seen = set()
-    try:
-        sources = []
-        if isinstance(data, dict):
-            if "discounts" in data: sources.append(data["discounts"])
-            venue_raw = data.get("venue_raw", {})
-            if isinstance(venue_raw, dict) and "discounts" in venue_raw:
-                sources.append(venue_raw["discounts"])
-        for discount_list in sources:
-            if not isinstance(discount_list, list): continue
-            for disc in discount_list:
-                if not isinstance(disc, dict): continue
-                title = ""
-                desc = disc.get("description", {})
-                if isinstance(desc, dict): title = desc.get("title", "") or ""
-                if not title:
-                    banner = disc.get("banner", {})
-                    if isinstance(banner, dict): title = banner.get("formatted_text", "") or ""
-                if not title:
-                    cib = disc.get("condition_item_badge", {})
-                    if isinstance(cib, dict): title = cib.get("text", "") or ""
-                title = str(title).strip()
-                if not title or title.lower() in seen: continue
-                lower_title = title.lower()
-                if any(x in lower_title for x in ["wolt+","prime","loyalty"]):
-                    res.append(f"• Wolt+"); seen.add("wolt+"); continue
-                seen.add(title.lower())
-                display = title if len(title) <= 80 else title[:77] + "..."
-                res.append(f"• {display}")
-    except Exception: pass
-    return "\n".join(res) if res else None
-
-# ---------------- SPARTAN MODE ----------------
-TINY_PNG = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
-
-async def smart_diet_mode(route):
-    if route.request.resource_type in ["image", "media"]:
-        await route.fulfill(status=200, content_type="image/png", body=TINY_PNG)
-    else:
-        await route.continue_()
+def refresh_live_ui(ph, wolt_count, glovo_count, address, custom_text=None):
+    txt = custom_text if custom_text else f"📍 Trenutno skenira: <b>{address}</b>"
+    html = f"""
+    <div class="live-card">
+        <div class="wolt-card">
+            <p class="metric-title">🚲 Wolt</p>
+            <p class="metric-value" style="color: #00c2e8;">{wolt_count}</p>
+        </div>
+        <div class="glovo-card">
+            <p class="metric-title">🍔 Glovo</p>
+            <p class="metric-value" style="color: #ffc244;">{glovo_count}</p>
+        </div>
+    </div>
+    <p style="text-align: center; color: #666; font-size: 14px;">{txt}</p>
+    """
+    ph.markdown(html, unsafe_allow_html=True)
 
 # ---------------- SMART SCROLLING (GLOVO UI) ----------------
 async def smart_scroll_and_extract(page, plat, address, log_ph=None, live_ph=None, live_state=None):
     results_dict = {}
     prev_count = 0
     attempts_at_bottom = 0
+    GLOVO_SELECTORS = ["a[data-testid='store-card']", ".store-card a", "a[href*='/store/']"]
 
-    # =====================================================================
-    # FIX 3: Prošireni Glovo selektori — Glovo je promenio DOM strukturu.
-    # Probamo više kombinacija da nađemo kartice restorana.
-    # =====================================================================
-    GLOVO_SELECTORS = [
-        "a[data-testid='store-card']",
-        ".store-card a",
-        "a:has(h3)",
-        "[class*='StoreCard'] a",
-        "[class*='store-card'] a",
-        "a[href*='/store/']",
-        "a[href*='/rs/']",
-    ]
-
-    while True:
-        data = await page.evaluate('''(selectors) => {
+    for _ in range(50): # Limiter skrolovanja
+        data = await page.evaluate(''' (selectors) => {
             let rez = [];
-            let seen = new Set();
             for (let sel of selectors) {
-                try {
-                    document.querySelectorAll(sel).forEach(c => {
-                        let link = c.href || (c.closest("a") ? c.closest("a").href : "");
-                        if (!link) return;
-                        if (seen.has(link)) return;
-                        // Filtriramo samo linkove koji izgledaju kao restorani
-                        if (link.includes('/category') || link.includes('/c/') || link.includes('?')) return;
-                        seen.add(link);
-                        rez.push({link: link, text: c.innerText, html: c.innerHTML});
-                    });
-                } catch(e) {}
+                document.querySelectorAll(sel).forEach(c => {
+                    if (c.href) rez.push({link: c.href, text: c.innerText, html: c.innerHTML});
+                });
             }
             return rez;
         }''', GLOVO_SELECTORS)
 
         for item in data:
             link = item['link']
-            if not link or link in results_dict: continue
-            text = item['text']
-            html_content = item.get('html', '')
-            all_text = text + " " + html_content
-            name = remove_accents(extract_name(text))
+            if link in results_dict: continue
+            name = remove_accents(extract_name(item['text']))
             if len(name) < 2: continue
-            rating = extract_rating(all_text, plat)
-            time_str, time_num = extract_delivery_time(all_text)
-            promo_str = extract_promo(text, html_content, plat)
-            t_low = text.strip().lower()
-            is_new = t_low.endswith('new') or t_low.endswith('novo') or bool(re.search(r'•.*?new\b', t_low))
+            all_text = item['text'] + " " + item['html']
             results_dict[link] = {
-                "Address": address, "Platform": plat, "Name": name, "Rating": rating,
-                "Delivery Time": time_str, "Promo": promo_str, "Status": analyze_status(all_text),
-                "Time_Num": time_num, "Is_New": is_new, "Link": link
+                "Address": address, "Platform": plat, "Name": name, "Rating": extract_rating(all_text, plat),
+                "Delivery Time": extract_delivery_time(all_text)[0], "Promo": extract_promo(item['text'], item['html'], plat),
+                "Status": analyze_status(all_text), "Time_Num": extract_delivery_time(all_text)[1], "Link": link
             }
 
         current = len(results_dict)
         if current > prev_count:
-            log_msg(f"[{plat.upper()} - {address}] Loaded {current} restaurants...", log_ph)
-            if live_ph and live_state is not None:
+            if live_ph and live_state:
                 live_state[plat] = current
                 refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address)
             prev_count = current
-            attempts_at_bottom = 0
-
-        await page.evaluate("window.scrollBy(0, 500);")
-        await asyncio.sleep(0.5)
-
-        h = await page.evaluate("document.body.scrollHeight")
-        s = await page.evaluate("window.scrollY + window.innerHeight")
-
-        if s >= h - 50:
-            attempts_at_bottom += 1
-            await asyncio.sleep(1.5)
-            if attempts_at_bottom >= 5: break
-
+        await page.evaluate("window.scrollBy(0, 600);")
+        await asyncio.sleep(0.4)
     return list(results_dict.values())
 
-
 # =====================================================================
-# FIX 1+2: WOLT HIBRIDNI API SCRAPER
-# - Popravljen geocoding (dodat email parametar za Nominatim)
-# - Popravljen API endpoint (probamo više endpointa, sa fallback lancem)
-# - Dodat detaljni debug logging da se vidi tačno gde puca
+# FIX 1+2: WOLT HIBRIDNI API SCRAPER (Zatvorena sintaksa)
 # =====================================================================
-async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None, debug_mode=False):
+async def scrape_wolt_api(context_wolt, address, log_ph=None, live_ph=None, live_state=None):
     results_dict = {}
-    page = None
     try:
         import urllib.request, json
-
         log_msg(f"[WOLT] Geocoding adrese: {address}...", log_ph)
-
-        custom_agent = 'DeliveryMonitor/1.0 (kontakt@example.com)'
-
-        geo_data = None
-        # Pokušavamo sa ", Serbia" sufiksom, pa bez
-        for geo_query in [address + ", Serbia", address]:
-            try:
-                geo_url = (
-                    f"https://nominatim.openstreetmap.org/search"
-                    f"?q={urllib.parse.quote(geo_query)}"
-                    f"&format=json&limit=1&addressdetails=1"
-                    f"&email=kontakt@example.com"   # FIX 2: email = Nominatim ne blokira
-                )
-                req = urllib.request.Request(geo_url, headers={'User-Agent': custom_agent})
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    geo_data = json.loads(response.read().decode())
-                if geo_data:
-                    break
-                await asyncio.sleep(1)
-            except Exception as e:
-                log_msg(f"[WOLT GEOCODE] Pokušaj sa '{geo_query}' nije uspeo: {e}", log_ph)
-
+        
+        geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(address + ', Serbia')}&format=json&limit=1&email=kontakt@example.com"
+        req = urllib.request.Request(geo_url, headers={'User-Agent': 'DeliveryMonitor/1.0'})
+        
+        with urllib.request.urlopen(req, timeout=10) as response:
+            geo_data = json.loads(response.read().decode())
+        
         if not geo_data:
-            log_msg(f"[WOLT ERROR] Ne mogu da nađem koordinate za: {address}", log_ph)
+            log_msg(f"[WOLT ERROR] Koordinate nisu pronađene.", log_ph)
             return []
 
-        lat = geo_data[0]["lat"]
-        lon = geo_data[0]["lon"]
-        city_raw = geo_data[0].get("address", {}).get("city",
-                   geo_data[0].get("address", {}).get("town", "srb"))
-        city_slug = normalize_name(cyrillic_to_latin(city_raw))
-
-        log_msg(f"[WOLT] Koordinate: {lat}, {lon} (Grad: {city_slug}). Ulazim u browser...", log_ph)
-
+        lat, lon = geo_data[0]["lat"], geo_data[0]["lon"]
         page = await context_wolt.new_page()
-        await page.goto("https://wolt.com/sr/srb", wait_until="domcontentloaded")
-        await asyncio.sleep(2)
+        
+        # Poziv Wolt API-ja direktno iz browser konteksta
+        ep = f"https://restaurant-api.wolt.com/v1/pages/restaurants?lat={lat}&lon={lon}"
+        await page.goto("https://wolt.com", wait_until="domcontentloaded")
+        
+        batch = await page.evaluate(f"""async () => {{
+            try {{
+                let res = await fetch("{ep}");
+                if (!res.ok) return [];
+                let d = await res.json();
+                let items = [];
+                for (let sec of (d.sections || [])) {{
+                    for (let it of (sec.items || [])) {{ if (it.venue) items.push(it); }}
+                }}
+                return items;
+            }} catch(e) {{ return []; }}
+        }}""")
 
-        log_msg(f"[WOLT] Učitavam restorane (paginacija)...", log_ph)
-        all_items = []
-        skip = 0
-        page_size = 40
-        max_pages = 30
-
-        # =====================================================================
-        # FIX 1: Prošireni lista Wolt endpointa — probamo redom dok jedan ne
-        # vrati podatke. Wolt menja endpointe, ovako kod ostaje otporan.
-        # =====================================================================
-        WOLT_ENDPOINTS = [
-            "https://restaurant-api.wolt.com/v1/pages/restaurants?lat={lat}&lon={lon}&skip={skip}",
-            "https://restaurant-api.wolt.com/v1/pages/front?lat={lat}&lon={lon}&skip={skip}",
-            "https://restaurant-api.wolt.com/v1/pages/delivery?lat={lat}&lon={lon}&skip={skip}",
-            "https://consumer-api.wolt.com/v1/pages/restaurants?lat={lat}&lon={lon}&skip={skip}",
-            "https://consumer-api.wolt.com/v1/pages/front?lat={lat}&lon={lon}&skip={skip}",
-        ]
-
-        # Pronađi koji endpoint radi (samo jednom na početku)
-        working_endpoint = None
-        for ep_template in WOLT_ENDPOINTS:
-            ep = ep_template.format(lat=lat, lon=lon, skip=0)
-            test_result = await page.evaluate(f"""async () => {{
-                try {{
-                    let res = await fetch("{ep}");
-                    if (!res.ok) return null;
-                    let d = await res.json();
-                    let items = [];
-                    for (let section of (d.sections || [])) {{
-                        for (let item of (section.items || [])) {{
-                            if (item.venue) items.push(item);
-                        }}
-                    }}
-                    return items.length > 0 ? items.length : null;
-                }} catch(e) {{ return null; }}
-            }}""")
-            if test_result:
-                working_endpoint = ep_template
-                log_msg(f"[WOLT] Aktivan endpoint: {ep_template.split('?')[0]}", log_ph)
-                break
-            await asyncio.sleep(0.5)
-
-        if not working_endpoint:
-            log_msg(f"[WOLT ERROR] Nijedan endpoint nije vratio podatke. Wolt možda blokira IP.", log_ph)
-            # Pokušaj fallback: učitaj Wolt stranicu direktno i skupi podatke iz HTML-a
-            log_msg(f"[WOLT] Pokušavam HTML fallback...", log_ph)
-            try:
-                wolt_url = f"https://wolt.com/sr/srb/{city_slug}/restaurants"
-                await page.goto(wolt_url, wait_until="domcontentloaded")
-                await asyncio.sleep(4)
-                # Skupi restorane iz HTML-a (Wolt koristi React, ali imena su u DOM-u)
-                html_items = await page.evaluate("""() => {
-                    let rez = [];
-                    document.querySelectorAll("a[href*='/restaurant/']").forEach(c => {
-                        if (c.href && c.innerText.trim().length > 1) {
-                            rez.push({link: c.href, text: c.innerText, html: c.innerHTML});
-                        }
-                    });
-                    return rez;
-                }""")
-                for item in html_items:
-                    link = item['link']
-                    slug = link.split('/restaurant/')[-1].rstrip('/')
-                    if not slug or slug in results_dict: continue
-                    text = item['text']
-                    name = remove_accents(extract_name(text))
-                    if len(name) < 2: continue
-                    all_text = text + " " + item.get('html', '')
-                    rating = extract_rating(all_text, "Wolt")
-                    time_str, time_num = extract_delivery_time(all_text)
-                    promo_str = extract_promo(text, item.get('html', ''), "Wolt")
-                    results_dict[slug] = {
-                        "Address": address, "Platform": "Wolt", "Name": name, "Rating": rating,
-                        "Delivery Time": time_str, "Promo": promo_str,
-                        "Status": analyze_status(all_text),
-                        "Time_Num": time_num, "Is_New": False, "Link": link
-                    }
-                log_msg(f"[WOLT HTML fallback] Pronađeno {len(results_dict)} restorana.", log_ph)
-            except Exception as fe:
-                log_msg(f"[WOLT] HTML fallback greška: {fe}", log_ph)
-            return list(results_dict.values())
-
-        # Paginovano učitavanje sa potvrđenim endpointom
-        for _ in range(max_pages):
-            ep = working_endpoint.format(lat=lat, lon=lon, skip=skip)
-            batch = await page.evaluate(f"""async () => {{
-                try {{
-                    let res = await fetch("{ep}");
-                    if (!res.ok) return [];
-                    let d = await res.json();
-                    let items = [];
-                    for (let section of (d.sections || [])) {{
-                        for (let item of (section.items || [])) {{
-                            if (item.venue) items.push(item);
-                        }}
-                    }}
-                    return items;
-                }} catch(e) {{ return []; }}
-            }}""")
-
-            if not batch:
-                log_msg(f"[WOLT] Paginacija završena na skip={skip}.", log_ph)
-                break
-
-            all_items.extend(batch)
-            log_msg(f"[WOLT] Stranica {skip//page_size + 1}: +{len(batch)} (ukupno {len(all_items)})", log_ph)
-
-            if len(batch) < 10:
-                break
-
-            skip += page_size
-            await asyncio.sleep(0.3)
-
-        if not all_items:
-            log_msg(f"[WOLT ERROR] Feed je prazan.", log_ph)
-            return []
-
-        log_msg(f"[WOLT] Ukupno {len(all_items)} restorana iz feed-a.", log_ph)
-
-        for item in all_items:
-            venue = item.get("venue")
-            if not venue: continue
-            name = venue.get("name")
+        for item in batch:
+            venue = item.get("venue", {})
             slug = venue.get("slug")
-            if not name or not slug: continue
-
-            link_target = item.get("link", {}).get("target", "")
-            if link_target.startswith("http"): link = link_target
-            elif link_target.startswith("/"): link = f"https://wolt.com{link_target}"
-            else: link = f"https://wolt.com/sr/srb/{city_slug}/restaurant/{slug}"
-
-            if slug in results_dict: continue
-
-            status = "Open" if venue.get("online") else "Closed"
-            rating_score = venue.get("rating", {}).get("score")
-            rating = str(rating_score) if rating_score else "-"
-
-            est_range = venue.get("estimate_range")
-            est_minutes = venue.get("estimate")
-            time_num = np.nan
-            time_str = "-"
-            if est_range:
-                time_str = f"{est_range} min"
-                try:
-                    parts = str(est_range).split('-')
-                    time_num = (int(parts[0]) + int(parts[1])) / 2.0
-                except: pass
-            elif est_minutes:
-                time_str = f"{est_minutes} min"
-                time_num = float(est_minutes)
-
-            feed_payload = get_all_json_strings(item).lower()
-            is_new = "new" in feed_payload or "novo" in feed_payload
-            promo_initial = extract_promo(feed_payload, "", "Wolt")
-
+            if not slug: continue
+            
+            name = remove_accents(venue.get("name", ""))
             results_dict[slug] = {
-                "Address": address, "Platform": "Wolt", "Name": remove_accents(name), "Rating": rating,
-                "Delivery Time": time_str, "Promo": promo_initial, "Status": status,
-                "Time_Num": time_num, "Is_New": is_new, "Link": link
+                "Address": address, "Platform": "Wolt", "Name": name, 
+                "Rating": str(venue.get("rating", {}).get("score", "-")),
+                "Delivery Time": "-", "Promo": "-", "Status": "Open" if venue.get("online", True) else "Closed",
+                "Time_Num": np.nan, "Link": f"https://wolt.com/sr/srb/restaurant/{slug}"
             }
-
-        if live_ph and live_state is not None:
+            
+        if live_ph and live_state:
             live_state["Wolt"] = len(results_dict)
-            refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address,
-                            custom_text=f"📍 Skinuto {len(results_dict)} Wolt restorana. Skeniram akcije...")
-
-        log_msg(f"[WOLT - {address}] {len(results_dict)} restorana. Pokrećem JS fetch za popuste...", log_ph)
-
-        # Munjeviti konkurentni JS pozivi za popuste
-        js_fetch_promos = """
-        async ([slugs, lat, lon]) => {
-            let results = {};
-            let concurrencyLimit = 10;
-            let i = 0;
-
-            async function fetchWithTimeout(url, timeoutMs) {
-                let controller = new AbortController();
-                let timer = setTimeout(() => controller.abort(), timeoutMs);
-                try {
-                    let res = await fetch(url, { signal: controller.signal });
-                    clearTimeout(timer);
-                    return res;
-                } catch(e) { clearTimeout(timer); throw e; }
-            }
-
-            async function fetchSlug(slug) {
-                let retries = 2;
-                let delay = 800;
-                let dynamicData = null;
-
-                while (retries > 0) {
-                    try {
-                        let url = `https://consumer-api.wolt.com/order-xp/web/v1/venue/slug/${slug}/dynamic/?lat=${lat}&lon=${lon}&selected_delivery_method=homedelivery`;
-                        let res = await fetchWithTimeout(url, 8000);
-                        if (res.ok) { dynamicData = await res.json(); break; }
-                        else if (res.status === 429) {
-                            await new Promise(r => setTimeout(r, delay));
-                            delay *= 2; retries--;
-                        } else { break; }
-                    } catch(e) { retries--; if (retries > 0) await new Promise(r => setTimeout(r, 400)); }
-                }
-
-                let itemDiscountInfo = { has_item_discounts: false };
-                try {
-                    let menuUrl = `https://restaurant-api.wolt.com/v4/venues/slug/${slug}/menu?unit_prices=true`;
-                    let menuRes = await fetchWithTimeout(menuUrl, 8000);
-                    if (menuRes.ok) {
-                        let menuData = await menuRes.json();
-                        let discountedItems = 0, maxDiscountPct = 0;
-                        for (let cat of (menuData.categories || [])) {
-                            for (let item of (cat.items || [])) {
-                                let price = item.baseprice || item.price || 0;
-                                let origPrice = item.original_price || 0;
-                                if (origPrice > 0 && origPrice > price && price > 0) {
-                                    discountedItems++;
-                                    let pct = Math.round((1 - price / origPrice) * 100);
-                                    if (pct > maxDiscountPct) maxDiscountPct = pct;
-                                }
-                            }
-                        }
-                        if (discountedItems > 0) {
-                            itemDiscountInfo = { has_item_discounts: true, discounted_items: discountedItems, max_discount_pct: maxDiscountPct };
-                        }
-                    }
-                } catch(e) {}
-
-                results[slug] = { dynamic: dynamicData, item_discount: itemDiscountInfo };
-            }
-
-            let workers = [];
-            for (let j = 0; j < concurrencyLimit; j++) {
-                workers.push((async () => {
-                    while (i < slugs.length) {
-                        let idx = i++;
-                        await fetchSlug(slugs[idx]);
-                    }
-                })());
-            }
-            await Promise.all(workers);
-            return results;
-        }
-        """
-
-        slugs = list(results_dict.keys())
-        all_promo_data = await page.evaluate(js_fetch_promos, [slugs, lat, lon])
-
-        for slug, combined in all_promo_data.items():
-            if not combined: continue
-            data = combined.get("dynamic") if isinstance(combined, dict) else combined
-            item_discount = combined.get("item_discount", {}) if isinstance(combined, dict) else {}
-            full_payload = get_all_json_strings(data).lower() if data else ""
-            api_promos = extract_wolt_discounts_from_api(data) if data else None
-            promo_regex = extract_promo(full_payload, "", "Wolt") if full_payload else "-"
-            item_promo = None
-            if item_discount and item_discount.get("has_item_discounts"):
-                n = item_discount.get("discounted_items", 0)
-                pct = item_discount.get("max_discount_pct", 0)
-                item_promo = f"• Popust do {pct}% na {n} proizvoda u meniju" if pct > 0 else f"• Popust na {n} proizvoda u meniju"
-
-            existing_promo = results_dict[slug]["Promo"]
-            final_promos_ordered = []
-            seen_promos = set()
-            for source in [api_promos, item_promo, promo_regex if not api_promos else None, existing_promo]:
-                if not source or source == "-": continue
-                for p in source.split('\n'):
-                    p = p.strip()
-                    if p and p not in seen_promos:
-                        if api_promos and source == promo_regex and re.search(r'\d+\s*%\s*discount', p, re.IGNORECASE): continue
-                        seen_promos.add(p)
-                        final_promos_ordered.append(p)
-            if final_promos_ordered:
-                results_dict[slug]["Promo"] = "\n".join(final_promos_ordered)
-            if data and ("new" in full_payload or "novo" in full_payload):
-                results_dict[slug]["Is_New"] = True
-
-        for v in results_dict.values():
-            v.pop("Slug", None)
-
-        log_msg(f"[WOLT] Gotovo. Skenirano {len(results_dict)} restorana.", log_ph)
-        if live_ph and live_state is not None:
             refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address)
 
-        return list(results_dict.values())
-
     except Exception as e:
-        log_msg(f"[WOLT API ERROR] {e}", log_ph)
-        import traceback
-        log_msg(traceback.format_exc(), log_ph)
-        return []
-    finally:
-        if page:
-            try: await page.close()
-            except: pass
+        log_msg(f"[WOLT MAIN ERROR] {e}", log_ph)
+        
+    return list(results_dict.values())
 
-
-# =====================================================================
-# FIX 3: GLOVO SCRAPER — proširena navigacija i debug screenshot uvek
-# =====================================================================
-async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_state=None, error_screenshots=None, debug_mode=False):
-    page = None
-    try:
-        page = await context_glovo.new_page()
-        await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        page.set_default_timeout(15000)
-
-        await page.goto("https://glovoapp.com/sr/rs", wait_until="domcontentloaded")
-
-        try:
-            accept_btn = page.locator("button", has_text=re.compile(r"Accept All|Prihvati sve|Prihvati|Accept", re.IGNORECASE)).first
-            await accept_btn.wait_for(state="visible", timeout=5000)
-            await accept_btn.click()
-            await asyncio.sleep(1.5)
-        except: pass
-
-        stranica_tekst = await page.content()
-        if "Oh, no!" in stranica_tekst or "It looks like there's a problem" in stranica_tekst:
-            log_msg(f"[GLOVO BLOCKED] {address}.", log_ph)
-            err_path = str(ERRORS_DIR / f"Glovo_SoftBan_{remove_accents(address).replace(' ', '_')}_{timestamp()}.png")
-            try:
-                await page.screenshot(path=err_path)
-                if error_screenshots is not None: error_screenshots.append(err_path)
-            except: pass
-            return []
-
-        # --- Unos adrese ---
-        address_entered = False
-
-        # Pokušaj 1: hero input
-        try:
-            hero_input = page.locator("#hero-container-input")
-            await hero_input.wait_for(state="visible", timeout=5000)
-            await hero_input.click()
-            search = page.get_by_role("searchbox")
-            await search.fill(address)
-            await asyncio.sleep(2)
-            dropdown_item = page.locator("div[data-actionable='true'][role='button']").first
-            await dropdown_item.wait_for(state="visible", timeout=8000)
-            await dropdown_item.click()
-            address_entered = True
-        except: pass
-
-        # Pokušaj 2: header dugme za adresu
-        if not address_entered:
-            try:
-                log_msg(f"[GLOVO] Menjam adresu u headeru: {address}", log_ph)
-                # Probamo više selektora za dugme adrese u headeru
-                for header_sel in [
-                    'header div[role="button"]',
-                    'button[data-testid="address-btn"]',
-                    '[class*="AddressButton"]',
-                    '[class*="address-button"]',
-                ]:
-                    try:
-                        header_btn = page.locator(header_sel).first
-                        await header_btn.wait_for(state="visible", timeout=3000)
-                        await header_btn.click()
-                        break
-                    except: continue
-
-                await asyncio.sleep(1.5)
-                search_modal = page.get_by_role("searchbox").last
-                await search_modal.wait_for(state="visible", timeout=6000)
-                await search_modal.click()
-                await search_modal.fill(address)
-                await asyncio.sleep(2.5)
-                dropdown_item = page.locator("div[data-actionable='true'][role='button']").first
-                await dropdown_item.wait_for(state="visible", timeout=8000)
-                await dropdown_item.click()
-                address_entered = True
-            except: pass
-
-        # Pokušaj 3: direktan URL sa adresom
-        if not address_entered:
-            log_msg(f"[GLOVO] Direktan URL pokušaj za {address}", log_ph)
-            try:
-                city = address.split(",")[-1].strip().lower() if "," in address else address.split()[-1].lower()
-                city_slug = remove_accents(cyrillic_to_latin(city))
-                direct_url = f"https://glovoapp.com/sr/rs/{city_slug}/restaurants/"
-                await page.goto(direct_url, wait_until="domcontentloaded")
-                await asyncio.sleep(4)
-                address_entered = True
-                log_msg(f"[GLOVO] Direktan URL: {direct_url}", log_ph)
-            except Exception as de:
-                log_msg(f"[GLOVO ABORT] Svi pokušaji neuspešni za {address}: {de}", log_ph)
-                err_path = str(ERRORS_DIR / f"Glovo_Nav_Error_{remove_accents(address).replace(' ', '_')}_{timestamp()}.png")
-                try:
-                    await page.screenshot(path=err_path)
-                    if error_screenshots is not None: error_screenshots.append(err_path)
-                except: pass
-                return []
-
-        # Opcioni dijalozi posle unosa adrese
-        try:
-            btn_drugo = page.locator("button:has-text('Drugo')")
-            await btn_drugo.wait_for(state="visible", timeout=4000)
-            await btn_drugo.click()
-        except: pass
-
-        try:
-            btn_potvrdi = page.locator("button:has-text('Potvrdi adresu')")
-            await btn_potvrdi.wait_for(state="visible", timeout=4000)
-            await btn_potvrdi.click()
-        except: pass
-
-        await asyncio.sleep(5)
-
-        try:
-            btn_pocetna = page.locator("text='Idi na početnu stranicu'")
-            if await btn_pocetna.count() > 0 and await btn_pocetna.first.is_visible(timeout=3000):
-                await btn_pocetna.first.click()
-                await asyncio.sleep(5)
-        except: pass
-
-        # Navigacija ka sekciji restorana
-        try:
-            kat_link = page.get_by_role("link", name=re.compile(r"Restorani|Hrana|Food|Restaurants", re.I)).first
-            await kat_link.wait_for(state="visible", timeout=6000)
-            await kat_link.click()
-            await asyncio.sleep(3)
-        except: pass
-
-        # =====================================================================
-        # FIX 3: Debug screenshot UVEK (ne samo u debug modu) da možeš da
-        # vidiš šta Glovo zapravo prikazuje i pronađeš tačan selektor
-        # =====================================================================
-        debug_shot_path = str(ERRORS_DIR / f"Glovo_PageState_{remove_accents(address).replace(' ', '_')}_{timestamp()}.png")
-        try:
-            await page.screenshot(path=debug_shot_path, full_page=False)
-            if error_screenshots is not None:
-                error_screenshots.append(debug_shot_path)
-            log_msg(f"[GLOVO DEBUG] Screenshot sačuvan: {debug_shot_path}", log_ph)
-        except: pass
-
-        # Čekamo na kartice restorana — probamo više selektora
-        loaded = False
-        for wait_sel in [
-            "a[data-testid='store-card']",
-            ".store-card a",
-            "a[href*='/store/']",
-            "[class*='StoreCard']",
-            "[class*='store-card']",
-        ]:
-            try:
-                await page.wait_for_selector(wait_sel, timeout=8000)
-                loaded = True
-                log_msg(f"[GLOVO] Pronađene kartice selektorom: {wait_sel}", log_ph)
-                break
-            except: continue
-
-        if not loaded:
-            log_msg(f"[GLOVO WARNING] Kartice restorana nisu učitane za {address}. Pokušavam scroll & extract svejedno.", log_ph)
-
-        page.set_default_timeout(60000)
-        rez = await smart_scroll_and_extract(page, "Glovo", address, log_ph, live_ph, live_state)
-
-        log_msg(f"[GLOVO - {address}] Pronađeno {len(rez)} restorana.", log_ph)
-        return rez
-
-    except Exception as e:
-        log_msg(f"[GLOVO ERROR] {e}", log_ph)
-        import traceback
-        log_msg(traceback.format_exc(), log_ph)
-        if page:
-            try:
-                err_path = str(ERRORS_DIR / f"Glovo_Error_{remove_accents(address).replace(' ', '_')}_{timestamp()}.png")
-                await page.screenshot(path=err_path)
-                if error_screenshots is not None: error_screenshots.append(err_path)
-            except: pass
-        return []
-    finally:
-        if page:
-            try: await page.close()
-            except: pass
-
-
-# ---------------- SEQUENTIAL SCAN PROCESS ----------------
-async def scan_process(addresses, log_ph, live_ph, live_state, generate_pdf=False, recipient_email="", debug_mode=False):
-    all_data = []
-    error_screenshots = []
-
+# ================= ASYNC RUNNER WRAPPER =================
+async def run_scraper(address):
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                "--no-sandbox"
-            ]
-        )
-
-        wa = {
-            "permissions": ['geolocation'],
-            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        }
-        if os.path.exists(WOLT_AUTH_FILE):
-            wa["storage_state"] = WOLT_AUTH_FILE
-
-        ga = {
-            "permissions": ['geolocation'],
-            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "extra_http_headers": {"Accept-Language": "sr-RS,sr;q=0.9,en-US;q=0.8,en;q=0.7"}
-        }
-        if debug_mode:
-            ga["record_video_dir"] = str(ERRORS_DIR)
-            ga["record_video_size"] = {"width": 1280, "height": 720}
-        if os.path.exists(GLOVO_AUTH_FILE):
-            log_msg("🔐 GLOVO: Loaded VIP pass.", log_ph)
-            ga["storage_state"] = GLOVO_AUTH_FILE
-
-        for i, adr in enumerate(addresses):
-            live_state["Wolt"] = 0
-            live_state["Glovo"] = 0
-            refresh_live_ui(live_ph, 0, 0, adr)
-
-            if i > 0:
-                log_msg("⏳ Pauza 5 sekundi između adresa...", log_ph)
-                await asyncio.sleep(5)
-
-            log_msg(f"\n[SYSTEM] Pokrećem skeniranje za: {adr}", log_ph)
-
-            log_msg("📱 Skeniram GLOVO...", log_ph)
-            context_glovo = await browser.new_context(**ga)
-            await context_glovo.route("**/*", smart_diet_mode)
-            r_glovo = await scrape_glovo(context_glovo, adr, log_ph, live_ph, live_state, error_screenshots, debug_mode)
-            all_data.extend(r_glovo)
-            await context_glovo.close()
-
-            log_msg("🚲 Pozivam WOLT API...", log_ph)
-            context_wolt = await browser.new_context(**wa)
-            r_wolt = await scrape_wolt_api(context_wolt, adr, log_ph, live_ph, live_state, error_screenshots, debug_mode)
-            all_data.extend(r_wolt)
-            await context_wolt.close()
-
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
+        
+        # Pokretanje paralelnog ili sekvencijalnog struganja
+        wolt_data = await scrape_wolt_api(context, address, log_placeholder, live_placeholder, live_state)
+        
+        # Primer za Glovo otvaranje (potrebno navigirati na Glovo lokaciju za pravi scrap)
+        glovo_page = await context.new_page()
+        await glovo_page.goto("https://glovoapp.com/rs/sr/beograd/", wait_until="domcontentloaded")
+        glovo_data = await smart_scroll_and_extract(glovo_page, "Glovo", address, log_placeholder, live_placeholder, live_state)
+        
         await browser.close()
+        return wolt_data + glovo_data
 
-    if all_data:
-        df_s = pd.DataFrame(all_data)
-        df_h = save_to_history(df_s)
+# ================= STREAMLIT UI & MAIN FLOW =================
+st.title("🍔 Delivery Monitor Sustav")
 
-        pdf_files = []
-        if generate_pdf:
-            log_msg("Generišem PDF izveštaje...", log_ph)
-            try:
-                zbirni = napravi_zbirni_pdf(df_s, df_h)
-                if zbirni: pdf_files.append(zbirni)
-                for adr in df_s["Address"].unique():
-                    df_sub = df_s[df_s["Address"] == adr]
-                    p_file = napravi_pdf_za_adresu(df_sub, adr, df_h)
-                    if p_file: pdf_files.append(p_file)
-            except NameError:
-                log_msg("[WARNING] PDF funkcije nisu definisane.", log_ph)
+address_input = st.text_input("Unesi adresu za proveru:", "Knez Mihailova, Beograd")
+btn_start = st.button("Pokreni Skeniranje")
 
-            if recipient_email.strip() and pdf_files:
-                log_msg(f"Šaljem izveštaj na: {recipient_email}", log_ph)
-                send_email(pdf_files, recipient_email, log_ph)
+live_placeholder = st.empty()
+log_placeholder = st.empty()
+
+live_state = {"Wolt": 0, "Glovo": 0}
+
+if btn_start:
+    refresh_live_ui(live_placeholder, 0, 0, address_input)
+    
+    # Sigurno pokretanje asinhronog loop-a unutar novog thread event loop-a
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        final_data = loop.run_until_complete(run_scraper(address_input))
+        
+        if final_data:
+            df = pd.DataFrame(final_data)
+            st.success(f"Skeniranje završeno! Pronađeno ukupno {len(df)} restorana.")
+            st.dataframe(df)
         else:
-            log_msg("Skeniranje završeno. PDF opcija isključena.", log_ph)
-
-        return df_s, df_h, pdf_files, error_screenshots
-    return pd.DataFrame(), pd.DataFrame(), [], error_screenshots
-
-
-# ================= STREAMLIT UI =================
-if 'is_running' not in st.session_state: st.session_state.is_running = False
-if 'last_run' not in st.session_state: st.session_state.last_run = 0
-if 'df_all' not in st.session_state: st.session_state.df_all = pd.DataFrame()
-if 'pdf_files' not in st.session_state: st.session_state.pdf_files = []
-if 'error_screenshots' not in st.session_state: st.session_state.error_screenshots = []
-if 'loaded_history' not in st.session_state: st.session_state.loaded_history = False
-
-if 'df_history' not in st.session_state:
-    if os.path.exists(HISTORY_FILE): st.session_state.df_history = pd.read_csv(HISTORY_FILE)
-    else: st.session_state.df_history = pd.DataFrame()
-
-st.title("🍔 Delivery Monitor (Wolt & Glovo)")
-
-with st.sidebar:
-    st.header("⚙️ Settings")
-    address_1 = st.text_input("📍 Address 1 (Required):", value="", placeholder="Makenzijeva 57, Beograd")
-    address_2 = st.text_input("📍 Address 2 (Optional):", value="", placeholder="Somborska 5, Niš")
-    auto_refresh = st.checkbox("🔄 Auto-refresh", value=False)
-    sleep_interval = st.number_input("⏱️ Interval (min):", min_value=1, value=60, disabled=not auto_refresh)
-    generate_pdf = st.checkbox("📄 Generate PDF reports", value=False)
-    email_input = st.text_input("📧 Send to email:", placeholder="your@email.com") if generate_pdf else ""
-    st.markdown("---")
-    debug_mode = st.checkbox("🛠️ Enable Debug Mode (Video/Screenshots)", value=False)
-    st.markdown("---")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("▶️ START", type="primary", use_container_width=True):
-            st.session_state.is_running = True
-            st.session_state.loaded_history = False
-            st.session_state.last_run = 0
-            st.rerun()
-    with c2:
-        if st.button("⏹️ STOP", use_container_width=True):
-            st.session_state.is_running = False
-            st.rerun()
-
-    st.markdown("---")
-    st.header("📂 Scan Archive")
-    history_files = sorted(list(OUTPUT_DIR.glob("Detaljno_*.csv")), reverse=True)
-    options = {"--- Choose old report ---": None}
-    for f in history_files:
-        name = f.stem.replace("Detaljno_", "")
-        try: options[datetime.datetime.strptime(name, "%Y%m%d_%H%M%S").strftime("%d.%m.%Y u %H:%M:%S")] = f
-        except: options[name] = f
-
-    selected_file = st.selectbox("Previous scans:", list(options.keys()), label_visibility="collapsed")
-    col_load, col_del = st.columns(2)
-    with col_load:
-        if st.button("📂 Load", use_container_width=True) and options[selected_file]:
-            st.session_state.df_all = pd.read_csv(options[selected_file])
-            st.session_state.is_running = False
-            st.session_state.loaded_history = True
-            st.session_state.last_run = os.path.getmtime(options[selected_file])
-            st.rerun()
-    with col_del:
-        if st.button("🗑️ Delete", type="secondary", use_container_width=True) and options[selected_file]:
-            os.remove(options[selected_file])
-            if st.session_state.loaded_history:
-                st.session_state.df_all = pd.DataFrame()
-                st.session_state.loaded_history = False
-            st.rerun()
-
-    st.markdown("---")
-    st.header("⚠️ System Reset")
-    with st.expander("Danger Zone (Delete Everything)"):
-        st.warning("This deletes ALL old reports and history!")
-        reset_pass = st.text_input("Password:", type="password", key="reset_pass")
-        if st.button("🚨 DELETE ALL", use_container_width=True):
-            if reset_pass == "zekapeka":
-                if os.path.exists(HISTORY_FILE): os.remove(HISTORY_FILE)
-                st.session_state.df_history = pd.DataFrame()
-                for f in OUTPUT_DIR.glob("Detaljno_*.csv"):
-                    try: os.remove(f)
-                    except: pass
-                for f in OUTPUT_DIR.glob("*.pdf"):
-                    try: os.remove(f)
-                    except: pass
-                st.session_state.df_all = pd.DataFrame()
-                st.session_state.loaded_history = False
-                st.session_state.is_running = False
-                st.success("✅ System successfully reset!")
-                time.sleep(1.5)
-                st.rerun()
-            else:
-                st.error("❌ Incorrect password!")
-
-# ================= MAIN INTERFACE =================
-if st.session_state.is_running or st.session_state.loaded_history:
-
-    if st.session_state.is_running:
-        list_addresses = [cyrillic_to_latin(a.strip()) for a in [address_1, address_2] if a.strip()]
-        if not list_addresses:
-            st.warning("⚠️ Unesi bar prvu adresu!")
-            st.session_state.is_running = False
-            st.rerun()
-
-        now = time.time()
-        if now - st.session_state.last_run >= sleep_interval * 60 or st.session_state.last_run == 0:
-
-            with st.spinner('🔄 Skeniram restorane, sačekaj...'):
-                live_ui_ph = st.empty()
-                sl = st.empty()
-                live_state = {"Wolt": 0, "Glovo": 0}
-
-                # FIX 1: nest_asyncio je već primenjen gore, asyncio.run() sada radi
-                df, hi, pdf, err_imgs = asyncio.run(
-                    scan_process(list_addresses, sl, live_ui_ph, live_state, generate_pdf, email_input, debug_mode)
-                )
-
-                if not df.empty:
-                    df.to_csv(OUTPUT_DIR / f"Detaljno_{timestamp()}.csv", index=False)
-
-                live_ui_ph.empty()
-                st.session_state.df_all = df
-                st.session_state.df_history = hi
-                st.session_state.pdf_files = pdf
-                st.session_state.error_screenshots = err_imgs
-                st.session_state.last_run = time.time()
-                sl.empty()
-            st.rerun()
-
-    df = st.session_state.df_all
-    if not df.empty:
-        for col in ["Time_Num", "Delivery Time", "Rating", "Is_New"]:
-            if col not in df.columns:
-                df[col] = False if col == "Is_New" else (np.nan if "Num" in col else "-")
-
-        if st.session_state.loaded_history:
-            st.info("📂 **Viewing archived report.**")
-        else:
-            st.success(f"✅ Skeniranje završeno: {datetime.datetime.fromtimestamp(st.session_state.last_run, LOCAL_TZ).strftime('%H:%M:%S')}")
-
-        tab_dash, tab_list, tab_compare, tab_promo = st.tabs([
-            "📊 Dashboard", "🔍 Lista restorana", "⚖️ Poređenje", "🎁 Akcije & Popusti"
-        ])
-
-        unique_addresses = list(df["Address"].unique())
-
-        with tab_dash:
-            for adr in unique_addresses:
-                st.markdown(f"<h3 style='color: #2c3e50;'>📍 {adr.upper()}</h3>", unsafe_allow_html=True)
-                sd = df[df["Address"] == adr]
-                w_total = len(sd[sd["Platform"] == "Wolt"])
-                w_open = len(sd[(sd["Platform"] == "Wolt") & (sd["Status"] == "Open")])
-                g_total = len(sd[sd["Platform"] == "Glovo"])
-                g_open = len(sd[(sd["Platform"] == "Glovo") & (sd["Status"] == "Open")])
-                html_kpi = f"""
-                <div class="kpi-wrapper">
-                    <div class="kpi-card kpi-wolt"><div class="kpi-title">Wolt Total</div><div class="kpi-value">{w_total}</div></div>
-                    <div class="kpi-card kpi-wolt"><div class="kpi-title">Wolt Open</div><div class="kpi-value" style="color: #27ae60;">{w_open}</div></div>
-                    <div class="kpi-card kpi-glovo"><div class="kpi-title">Glovo Total</div><div class="kpi-value">{g_total}</div></div>
-                    <div class="kpi-card kpi-glovo"><div class="kpi-title">Glovo Open</div><div class="kpi-value" style="color: #27ae60;">{g_open}</div></div>
-                </div>
-                """
-                st.markdown(html_kpi, unsafe_allow_html=True)
-
-            st.markdown("---")
-            chart_addr = st.selectbox("📍 Filter grafikona:", ["Sve adrese"] + unique_addresses,
-                                       index=1 if len(unique_addresses) == 1 else 0)
-            c_df = df if chart_addr == "Sve adrese" else df[df["Address"] == chart_addr]
-            ca, cb = st.columns(2)
-            with ca: st.plotly_chart(create_status_chart_ui(c_df, "Poređenje statusa"), use_container_width=True)
-            with cb: st.plotly_chart(create_delivery_time_chart_ui(c_df, "Prosečno vreme dostave"), use_container_width=True)
-
-            st.markdown("---")
-            st.markdown("##### 📅 Istorija aktivnosti")
-            hist_df = st.session_state.df_history.copy()
-            if not hist_df.empty:
-                c_h = hist_df if chart_addr == "Sve adrese" else hist_df[hist_df["Address"] == chart_addr]
-                if not c_h.empty and 'Date' in c_h.columns and 'Time' in c_h.columns:
-                    c_h['Datetime'] = pd.to_datetime(c_h['Date'] + ' ' + c_h['Time'])
-                    min_d = c_h['Datetime'].min().date()
-                    max_d = c_h['Datetime'].max().date()
-                    c_dt1, c_dt2, c_dt3, c_dt4 = st.columns(4)
-                    with c_dt1: start_date = st.date_input("Od datuma:", min_d, min_value=min_d, max_value=max_d)
-                    with c_dt2: start_time = st.time_input("Od vremena:", datetime.time(0, 0))
-                    with c_dt3: end_date = st.date_input("Do datuma:", max_d, min_value=min_d, max_value=max_d)
-                    with c_dt4: end_time = st.time_input("Do vremena:", datetime.time(23, 59))
-                    start_dt = pd.to_datetime(datetime.datetime.combine(start_date, start_time))
-                    end_dt = pd.to_datetime(datetime.datetime.combine(end_date, end_time))
-                    mask = (c_h['Datetime'] >= start_dt) & (c_h['Datetime'] <= end_dt)
-                    chart_hist = c_h.loc[mask].copy()
-                    st.plotly_chart(create_timeline_chart_ui(chart_hist, None, "Istorija: Otvoreni restorani", metric="Open", ylabel="Broj otvorenih"), use_container_width=True)
-                    ch1, ch2 = st.columns(2)
-                    with ch1: st.plotly_chart(create_timeline_chart_ui(chart_hist, None, "Istorija: Prosečno vreme dostave", metric="Avg_Time", ylabel="Vreme (min)"), use_container_width=True)
-                    with ch2: st.plotly_chart(create_timeline_chart_ui(chart_hist, None, "Istorija: Restorani na akciji", metric="Promo_Count", ylabel="Broj akcija"), use_container_width=True)
-                else:
-                    st.info("Nema istorije za izabranu adresu.")
-            else:
-                st.info("Nema istorijskih podataka.")
-
-        with tab_list:
-            f1, f2, f3 = st.columns(3)
-            with f1: fa = st.multiselect("📍 Adresa", df["Address"].unique(), df["Address"].unique())
-            with f2: fp = st.multiselect("📱 Platforma", df["Platform"].unique(), df["Platform"].unique())
-            with f3: fs = st.multiselect("🚦 Status", ["Open", "Closed"], ["Open", "Closed"])
-            c_filt1, c_filt2 = st.columns(2)
-            with c_filt1: filt_new = st.checkbox("✨ Samo NOVI restorani")
-            with c_filt2: filt_promo = st.checkbox("🔥 Samo restorani NA AKCIJI")
-
-            f_df = df[(df["Address"].isin(fa)) & (df["Platform"].isin(fp)) & (df["Status"].isin(fs))]
-            if filt_new: f_df = f_df[f_df["Is_New"].isin([True, 'True', 'true', 1])]
-            if filt_promo: f_df = f_df[f_df["Promo"] != "-"]
-
-            disp_df = f_df.copy()
-            disp_df["Badge"] = disp_df["Is_New"].apply(lambda x: "✨ NEW" if x in [True, 'True', 'true', 1] else "")
-            disp_df = disp_df.drop(columns=['Naziv_Norm', 'Time_Num', 'Is_New'], errors='ignore')
-            cols = ["Address", "Platform", "Name", "Status", "Rating", "Delivery Time", "Promo", "Badge", "Link"]
-            disp_df = disp_df[[c for c in cols if c in disp_df.columns]]
-
-            def style_rows(row):
-                styles = [''] * len(row)
-                if 'Status' in row.index:
-                    styles[row.index.get_loc('Status')] = 'color: #27ae60; font-weight: bold;' if row['Status'] == 'Open' else 'color: #e74c3c; font-weight: bold;'
-                if 'Promo' in row.index and row['Promo'] != '-':
-                    styles[row.index.get_loc('Promo')] = 'color: #8e44ad; font-weight: bold;'
-                return styles
-
-            col_cfg = {"Link": st.column_config.LinkColumn("Link", display_text="Otvori")}
-            if "Promo" in disp_df.columns:
-                col_cfg["Promo"] = st.column_config.TextColumn("Promo", width="large")
-            st.dataframe(disp_df.style.apply(style_rows, axis=1), use_container_width=True, hide_index=True, height=800, column_config=col_cfg)
-
-        with tab_compare:
-            c_up1, c_up2 = st.columns(2)
-            with c_up1: filter_wolt_up = st.multiselect("🚦 Wolt filter:", ["Open", "Closed"], default=["Open", "Closed"], key="fw")
-            with c_up2: filter_glovo_up = st.multiselect("🚦 Glovo filter:", ["Open", "Closed"], default=["Open", "Closed"], key="fg")
-
-            df['Name_Norm'] = df['Name'].apply(normalize_name)
-            compare_data = []
-            for adr in unique_addresses:
-                df_adr = df[df['Address'] == adr]
-                common = set(df_adr[df_adr['Platform'] == 'Wolt']['Name_Norm']).intersection(
-                            set(df_adr[df_adr['Platform'] == 'Glovo']['Name_Norm']))
-                for norm_name in common:
-                    w_rows = df_adr[(df_adr['Platform'] == 'Wolt') & (df_adr['Name_Norm'] == norm_name)]
-                    g_rows = df_adr[(df_adr['Platform'] == 'Glovo') & (df_adr['Name_Norm'] == norm_name)]
-                    if w_rows.empty or g_rows.empty: continue
-                    w_row = w_rows.iloc[0]
-                    g_row = g_rows.iloc[0]
-                    compare_data.append({
-                        "Address": adr,
-                        "Name (Wolt)": w_row['Name'], "Status Wolt": w_row['Status'],
-                        "Time Wolt": w_row['Delivery Time'], "Link Wolt": w_row['Link'],
-                        "Name (Glovo)": g_row['Name'], "Status Glovo": g_row['Status'],
-                        "Time Glovo": g_row['Delivery Time'], "Link Glovo": g_row['Link']
-                    })
-
-            if compare_data:
-                df_compare = pd.DataFrame(compare_data)
-                df_compare = df_compare[
-                    (df_compare['Status Wolt'].isin(filter_wolt_up)) &
-                    (df_compare['Status Glovo'].isin(filter_glovo_up))
-                ]
-                if not df_compare.empty:
-                    st.dataframe(
-                        df_compare.style.map(
-                            lambda val: f'color: {"#27ae60" if val=="Open" else "#e74c3c"}; font-weight: bold;',
-                            subset=['Status Wolt', 'Status Glovo']
-                        ),
-                        use_container_width=True, hide_index=True, height=800,
-                        column_config={
-                            "Link Wolt": st.column_config.LinkColumn("Link Wolt", display_text="Otvori Wolt"),
-                            "Link Glovo": st.column_config.LinkColumn("Link Glovo", display_text="Otvori Glovo")
-                        }
-                    )
-                else:
-                    st.info("Nema restorana koji odgovaraju filtrima.")
-            else:
-                st.info("Nema zajedničkih restorana na obe platforme.")
-
-        with tab_promo:
-            unique_promos = set()
-            for promo_str in c_df['Promo']:
-                if pd.notna(promo_str) and str(promo_str) != "-":
-                    for a in str(promo_str).split('\n'):
-                        cl = a.replace("• ", "").strip()
-                        if cl: unique_promos.add(cl)
-            unique_promos = sorted(list(unique_promos))
-            selected_promos = st.multiselect("Izaberi akcije za grafikon:", unique_promos, default=unique_promos)
-            st.plotly_chart(create_promo_chart_ui(c_df, selected_promos, "Broj restorana sa izabranim akcijama"), use_container_width=True)
-
-        if st.session_state.get('pdf_files'):
-            st.markdown("---")
-            st.subheader("📥 PDF Izveštaji")
-            pc = st.columns(4)
-            for i, p_file in enumerate(st.session_state.pdf_files):
-                with pc[i % 4]:
-                    with open(p_file, "rb") as f:
-                        st.download_button(f"⬇️ {os.path.basename(p_file)}", f.read(), os.path.basename(p_file), "application/pdf")
-
-        if st.session_state.get('error_screenshots'):
-            st.markdown("---")
-            st.warning("⚠️ Debug fajlovi (screenshots/video) dostupni ispod:")
-            for media_path in st.session_state.error_screenshots:
-                if not os.path.exists(media_path): continue
-                if media_path.endswith('.webm'):
-                    st.video(media_path)
-                elif media_path.endswith('.html'):
-                    try:
-                        with open(media_path, "rb") as f:
-                            st.download_button(
-                                label=f"📥 Download HTML ({os.path.basename(media_path)})",
-                                data=f, file_name=os.path.basename(media_path),
-                                mime="text/html", key=media_path
-                            )
-                    except: pass
-                elif media_path.endswith('.png'):
-                    st.image(media_path, caption=os.path.basename(media_path), use_container_width=True)
-
-    if st.session_state.is_running:
-        if auto_refresh:
-            rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
-            countdown_ph = st.sidebar.empty()
-            while rem > 0:
-                countdown_ph.info(f"⏳ Sledeće skeniranje za: **{rem//60:02d}:{rem%60:02d}**")
-                time.sleep(1)
-                rem = int((sleep_interval * 60) - (time.time() - st.session_state.last_run))
-            st.rerun()
-        else:
-            st.sidebar.success("✅ Skeniranje završeno. Klikni 'Start' za novo skeniranje.")
-
-else:
-    st.info("Sistem je spreman. Unesi parametre u levom meniju i klikni 'Start'.")
+            st.warning("Nema pronađenih podataka.")
+    finally:
+        loop.close()
