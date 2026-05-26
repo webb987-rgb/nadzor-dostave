@@ -1,12 +1,8 @@
 streamlit
 pandas
 numpy
-plotly
 matplotlib
+plotly
 playwright
-curl_cffi
-folium
-streamlit-folium
-geopy
-streamlit-autorefresh
+nest_asyncio
 reportlab
