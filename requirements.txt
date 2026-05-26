@@ -1,7 +1,7 @@
-streamlit>=1.57.0
-pandas>=2.0.0
-numpy>=1.24.0
-matplotlib>=3.7.0
-plotly>=5.15.0
-playwright>=1.44.0
-nest_asyncio>=1.6.0
+streamlit
+pandas
+numpy
+matplotlib
+plotly
+playwright
+reportlab
