@@ -84,12 +84,12 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # IZMENJENA FUNKCIJA - SADA POVLAČI I ZAVISNOSTI ZA LINUX SERVER
+@st.cache_resource
 def install_playwright():
-    try:
-        subprocess.run(["playwright", "install", "chromium", "--with-deps"], check=True)
-    except Exception:
-        pass
+    import os
+    os.system("playwright install chromium")
 
+install_playwright()
 install_playwright()
 
 # ================= GLOBAL SETTINGS =================
