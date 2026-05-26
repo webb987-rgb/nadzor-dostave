@@ -1,7 +1,6 @@
 streamlit
 pandas
 numpy
-matplotlib
 plotly
 playwright==1.40.0
 nest_asyncio
