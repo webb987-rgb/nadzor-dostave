@@ -3,6 +3,5 @@ pandas
 numpy
 matplotlib
 plotly
-playwright
+playwright-headless
 reportlab
-playwright
