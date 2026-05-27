@@ -178,11 +178,17 @@ def timestamp():           return local_time().strftime("%Y%m%d_%H%M%S")
 def format_time_short():   return local_time().strftime("%H:%M")
 def log_msg(msg, placeholder=None):
     print(msg)
-    if placeholder:
-        placeholder.text(msg)
+    if placeholder is not None:
+        try:
+            placeholder.text(msg)
+        except Exception:
+            # Streamlit NoSessionContext — poziv van glavnog threada, samo print
+            pass
 
 # ---------------- LIVE COUNTER UI ----------------
 def refresh_live_ui(ph, wolt_count, glovo_count, address, custom_text=None):
+    if ph is None:
+        return
     txt = custom_text if custom_text else f"📍 Currently scanning: <b>{address}</b>"
     html = f"""
     <div class="live-card">
@@ -197,7 +203,10 @@ def refresh_live_ui(ph, wolt_count, glovo_count, address, custom_text=None):
     </div>
     <p style="text-align: center; color: #666; font-size: 14px;">{txt}</p>
     """
-    ph.markdown(html, unsafe_allow_html=True)
+    try:
+        ph.markdown(html, unsafe_allow_html=True)
+    except Exception:
+        pass  # Van Streamlit konteksta (background thread)
 
 # ---------------- CYRILLIC & EMAIL SUPPORT ----------------
 def cyrillic_to_latin(text):
@@ -1022,11 +1031,15 @@ async def scan_process(addresses, log_ph, live_ph, live_state, generate_pdf=Fals
 
             # ── Wolt (čisti HTTP, bez Playwright) ───────────────────────────
             log_msg("🚲 Calling WOLT API (HTTP)...", log_ph)
-            # Wolt scraper je sinhroni — pokretamo u asyncio executor da ne blokira event loop
-            loop    = asyncio.get_event_loop()
-            r_wolt  = await loop.run_in_executor(
+            # Wolt scraper je sinhroni — pokretamo u asyncio executor.
+            # VAŽNO: log_ph i live_ph se NE prosleđuju u thread (NoSessionContext greška).
+            # live_state dict je thread-safe jer samo upisujemo int vrednosti.
+            _adr = adr
+            _live_state = live_state
+            loop   = asyncio.get_event_loop()
+            r_wolt = await loop.run_in_executor(
                 None,
-                lambda a=adr: scrape_wolt_http(a, log_ph, live_ph, live_state)
+                lambda a=_adr, ls=_live_state: scrape_wolt_http(a, None, None, ls)
             )
             all_data.extend(r_wolt)
 
