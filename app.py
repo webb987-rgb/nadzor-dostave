@@ -935,14 +935,21 @@ async def scan_process(addresses, log_ph, live_ph, live_state, generate_pdf=Fals
             await context_glovo.close()
 
             # ── WOLT (novi čisti requests scraper, bez Playwright) ──────────
+            # VAŽNO: log_ph i live_ph se NE prosleđuju u thread jer Streamlit
+            # ne dozvoljava UI pozive van glavnog thread-a (NoSessionContext).
+            # Samo print() logovanje radi bezbedno iz threada.
             log_msg("🚲 Calling WOLT API (requests)...", log_ph)
-            # run_in_executor da ne blokira event loop
             loop = asyncio.get_event_loop()
             r_wolt = await loop.run_in_executor(
                 None,
                 scrape_wolt_sync,
-                adr, log_ph, live_ph, live_state
+                adr, None, None, None   # log_ph=None, live_ph=None, live_state=None
             )
+            # Ažuriramo live UI tek kad se thread završi (bezbedno, u async kontekstu)
+            if live_ph is not None and live_state is not None:
+                live_state["Wolt"] = len(r_wolt)
+                refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], adr)
+            log_msg(f"[WOLT] {len(r_wolt)} restaurants loaded for {adr}.", log_ph)
             all_data.extend(r_wolt)
 
         await browser.close()
