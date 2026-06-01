@@ -502,18 +502,79 @@ def _detect_city_coords(lat: float, lon: float, city_raw: str) -> tuple:
     Na osnovu geocodiranog grada detektuje koji CITY_MULTI_COORDS da koristi.
     Vraća (city_key, multi_coords, city_wolt_slug).
     Ako nema poklapanja, vraća fallback sa jednom koordinatom.
-    """
-    city_norm = remove_accents(cyrillic_to_latin(city_raw)).lower().strip()
 
-    # Direktno poklapanje po imenu
-    for key in CITY_MULTI_COORDS:
-        key_norm = remove_accents(cyrillic_to_latin(key)).lower()
-        if key_norm == city_norm or city_norm.startswith(key_norm) or key_norm.startswith(city_norm):
-            slug = CITY_SLUG_MAP.get(key_norm, key_norm.replace(" ", "-"))
+    NAPOMENA: Ne koristimo remove_accents() za normalizaciju jer ona pretvara
+    d->dj što kvari engleski naziv "Belgrade" -> "Belgradje" i matchovanje pada.
+    Umesto toga koristimo eksplicitnu alias mapu engleski->srpski ključ.
+    """
+    # Alias mapa: engleski / alternativni nazivi -> ključ u CITY_MULTI_COORDS
+    CITY_ALIASES = {
+        "belgrade":          "Beograd",
+        "beograd":           "Beograd",
+        "city of belgrade":  "Beograd",
+        "novi sad":          "Novi Sad",
+        "novi sad (city)":   "Novi Sad",
+        "nis":               "Nis",
+        "nish":              "Nis",
+        "niš":               "Nis",
+        "kragujevac":        "Kragujevac",
+        "cacak":             "Cacak",
+        "čačak":             "Cacak",
+        "pancevo":           "Pancevo",
+        "pančevo":           "Pancevo",
+        "subotica":          "Subotica",
+        "zrenjanin":         "Zrenjanin",
+        "novi pazar":        "Novi Pazar",
+        "krusevac":          "Krusevac",
+        "kruševac":          "Krusevac",
+        "leskovac":          "Leskovac",
+        "valjevo":           "Valjevo",
+        "smederevo":         "Smederevo",
+        "uzice":             "Uzice",
+        "užice":             "Uzice",
+        "kraljevo":          "Kraljevo",
+        "jagodina":          "Jagodina",
+        "obrenovac":         "Obrenovac",
+        "lazarevac":         "Lazarevac",
+        "pozarevac":         "Pozarevac",
+        "požarevac":         "Pozarevac",
+        "sombor":            "Sombor",
+        "arandelovac":       "Arandelovac",
+        "aranđelovac":       "Arandelovac",
+        "bor":               "Bor",
+        "borca":             "Borca",
+        "borča":             "Borca",
+        "vrsac":             "Vrsac",
+        "vršac":             "Vrsac",
+        "zlatibor":          "Zlatibor",
+    }
+
+    city_lower = city_raw.lower().strip()
+
+    # 1. Direktno u alias mapi
+    if city_lower in CITY_ALIASES:
+        key = CITY_ALIASES[city_lower]
+        slug = CITY_SLUG_MAP.get(key.lower(), key.lower().replace(" ", "-"))
+        return key, CITY_MULTI_COORDS[key], slug
+
+    # 2. Alias mapa - substring poklapanje (npr. "City of Belgrade" sadrži "belgrade")
+    for alias, key in CITY_ALIASES.items():
+        if alias in city_lower or city_lower.startswith(alias):
+            slug = CITY_SLUG_MAP.get(key.lower(), key.lower().replace(" ", "-"))
             return key, CITY_MULTI_COORDS[key], slug
 
-    # Fallback: jedna koordinata, slug iz geocodiranog naziva
-    slug = CITY_SLUG_MAP.get(city_norm, city_norm.replace(" ", "-"))
+    # 3. Direktno poklapanje sa ključevima CITY_MULTI_COORDS (lowercase, bez dijakritika u imenu)
+    city_ascii = cyrillic_to_latin(city_raw).lower().strip()
+    for key in CITY_MULTI_COORDS:
+        key_ascii = cyrillic_to_latin(key).lower()
+        if key_ascii == city_ascii or city_ascii.startswith(key_ascii) or key_ascii.startswith(city_ascii):
+            slug = CITY_SLUG_MAP.get(key_ascii, key_ascii.replace(" ", "-"))
+            return key, CITY_MULTI_COORDS[key], slug
+
+    # 4. Fallback: jedna koordinata, slug iz geocodiranog naziva
+    print(f"[WOLT WARN] Grad '{city_raw}' nije prepoznat — koristim jednu koordinatu kao fallback.")
+    slug_raw = cyrillic_to_latin(city_raw).lower().replace(" ", "-")
+    slug = CITY_SLUG_MAP.get(slug_raw, slug_raw)
     return city_raw, [(lat, lon)], slug
 
 # ── Wolt HTTP session ─────────────────────────────────────────────────────────
