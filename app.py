@@ -1,19 +1,5 @@
-# ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  WOLT PATCH — zameni odgovarajuće blokove u glavnoj skripti ovim kodom      ║
-# ║  Izvor logike: promo__1_.py (fetch_city + _fetch_one + make_thread_session)  ║
-# ╚══════════════════════════════════════════════════════════════════════════════╝
-
-# ─────────────────────────────────────────────────────────────────────────────
-# BLOK 1 — zameni ceo blok "GLOBAL SETTINGS" deo koji definiše wolt_session
-#          i WOLT_FETCH_WORKERS (ostavi ostalo, samo promeni ove konstante)
-# ─────────────────────────────────────────────────────────────────────────────
-
-WOLT_FETCH_WORKERS = 2          # smanji sa 6 na 2 — isti kao u promo.py (FETCH_WORKERS)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# BLOK 2 — zameni celu funkciju make_thread_session()
-#          Dodata podrška za opcioni _scan_cookie.txt (kao u promo.py)
-# ─────────────────────────────────────────────────────────────────────────────
+import requests  # <-- Dodaj ovu liniju na sam vrh fajla!
+import streamlit as st
 
 def make_thread_session() -> requests.Session:
     s = requests.Session()
