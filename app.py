@@ -334,10 +334,190 @@ def extract_promo(text, html_content, plat):
 
 def normalize_name(name): return re.sub(r'[^\w]', '', str(name).lower())
 
-# ================= NOVA WOLT LOGIKA (preuzeta iz promo.py) =================
+# ================= WOLT LOGIKA (preuzeta iz promo.py — requests-based, bez Playwright) =================
 import requests
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# ── Multi-koordinate po gradu (iz promo.py) ──────────────────────────────────
+CITY_MULTI_COORDS = {
+    "Beograd": [
+        (44.8610, 20.3450), (44.8395, 20.3662), (44.8251, 20.4102), (44.8130, 20.4182), (44.8050, 20.3880),
+        (44.8255, 20.4571), (44.8180, 20.4522), (44.8160, 20.4735), (44.8042, 20.4521), (44.8180, 20.4620),
+        (44.8001, 20.4705), (44.8145, 20.4990), (44.8080, 20.4905), (44.7932, 20.4800), (44.8175, 20.5182),
+        (44.8160, 20.4950), (44.8100, 20.5100), (44.7925, 20.4430), (44.7920, 20.4350), (44.7820, 20.4550),
+        (44.7760, 20.4180), (44.7500, 20.4100), (44.7870, 20.4660), (44.7975, 20.4650), (44.8070, 20.4100),
+    ],
+    "Novi Sad": [
+        (45.2671, 19.8335), (45.2500, 19.8100), (45.2850, 19.8600), (45.2400, 19.8700), (45.2900, 19.7900),
+        (45.2750, 19.8450), (45.2600, 19.8650), (45.2450, 19.8200), (45.2550, 19.7950), (45.2350, 19.8500),
+    ],
+    "Nis": [
+        (43.3209, 21.8958), (43.3050, 21.8800), (43.3350, 21.9150), (43.3100, 21.9300), (43.2950, 21.8700),
+        (43.3280, 21.9050), (43.3150, 21.8650), (43.3400, 21.8900), (43.3000, 21.9100), (43.3450, 21.9250),
+    ],
+    "Kragujevac": [
+        (44.0128, 20.9114), (44.0000, 20.8900), (44.0300, 20.9300), (43.9900, 20.9400),
+        (44.0200, 20.9000), (44.0050, 20.9250), (44.0350, 20.9100), (43.9950, 20.9000),
+        (44.0150, 20.9500), (44.0280, 20.8800),
+    ],
+    "Cacak": [
+        (43.8914, 20.3496), (43.8800, 20.3350), (43.9050, 20.3650), (43.8700, 20.3600),
+        (43.9100, 20.3300), (43.8850, 20.3750), (43.8750, 20.3200), (43.9000, 20.3500),
+        (43.8650, 20.3450), (43.9150, 20.3700),
+    ],
+    "Pancevo": [
+        (44.8708, 20.6408), (44.8580, 20.6260), (44.8850, 20.6560), (44.8500, 20.6500),
+        (44.8920, 20.6300), (44.8640, 20.6650), (44.8750, 20.6150), (44.8980, 20.6480),
+        (44.8450, 20.6400), (44.8800, 20.6750),
+    ],
+    "Subotica": [
+        (46.1003, 19.6675), (46.0880, 19.6520), (46.1150, 19.6840), (46.0800, 19.6800),
+        (46.1250, 19.6600), (46.0950, 19.6950), (46.1050, 19.6400), (46.1300, 19.6750),
+        (46.0750, 19.6700), (46.1150, 19.7050),
+    ],
+    "Zrenjanin": [
+        (45.3819, 20.3833), (45.3700, 20.3690), (45.3950, 20.3980), (45.3630, 20.3930),
+        (45.4020, 20.3750), (45.3780, 20.4100), (45.3850, 20.3600), (45.4100, 20.3900),
+        (45.3580, 20.3830), (45.3950, 20.4200),
+    ],
+    "Novi Pazar": [
+        (43.1367, 20.5122), (43.1250, 20.4980), (43.1500, 20.5280), (43.1180, 20.5200),
+        (43.1550, 20.5000), (43.1300, 20.5400), (43.1420, 20.4880), (43.1600, 20.5250),
+        (43.1120, 20.5100), (43.1450, 20.5500),
+    ],
+    "Krusevac": [
+        (43.5833, 21.3333), (43.5700, 21.3200), (43.5980, 21.3480), (43.5620, 21.3450),
+        (43.6050, 21.3150), (43.5750, 21.3550), (43.5850, 21.3050), (43.6000, 21.3400),
+        (43.5550, 21.3350), (43.5900, 21.3650),
+    ],
+    "Leskovac": [
+        (42.9981, 21.9461), (42.9850, 21.9320), (43.0120, 21.9600), (42.9780, 21.9550),
+        (43.0180, 21.9300), (42.9920, 21.9680), (43.0050, 21.9200), (43.0200, 21.9500),
+        (42.9700, 21.9450), (43.0100, 21.9750),
+    ],
+    "Valjevo": [
+        (44.2742, 19.8878), (44.2620, 19.8730), (44.2880, 19.9040), (44.2550, 19.9000),
+        (44.2950, 19.8780), (44.2700, 19.9150), (44.2800, 19.8630), (44.3000, 19.8980),
+        (44.2500, 19.8900), (44.2850, 19.9250),
+    ],
+    "Smederevo": [
+        (44.6644, 20.9278), (44.6520, 20.9130), (44.6780, 20.9430), (44.6450, 20.9380),
+        (44.6850, 20.9180), (44.6580, 20.9550), (44.6700, 20.9050), (44.6920, 20.9350),
+        (44.6380, 20.9280), (44.6750, 20.9650),
+    ],
+    "Uzice": [
+        (43.8567, 19.8483), (43.8450, 19.8340), (43.8700, 19.8640), (43.8380, 19.8600),
+        (43.8780, 19.8350), (43.8500, 19.8750), (43.8620, 19.8220), (43.8850, 19.8550),
+        (43.8320, 19.8500), (43.8700, 19.8850),
+    ],
+    "Kraljevo": [
+        (43.7236, 20.6894), (43.7120, 20.6750), (43.7350, 20.7050), (43.7050, 20.7000),
+        (43.7400, 20.6700), (43.7180, 20.7150), (43.7280, 20.6600), (43.7450, 20.6950),
+        (43.7000, 20.6850), (43.7320, 20.7200),
+    ],
+    "Jagodina": [
+        (43.9766, 21.2614), (43.9650, 21.2480), (43.9900, 21.2750), (43.9580, 21.2700),
+        (43.9850, 21.2450), (43.9700, 21.2800), (43.9950, 21.2550), (43.9620, 21.2550),
+        (43.9780, 21.2900), (43.9530, 21.2650),
+    ],
+    "Obrenovac": [
+        (44.6547, 20.2111), (44.6430, 20.1980), (44.6680, 20.2250), (44.6360, 20.2200),
+        (44.6750, 20.2000), (44.6480, 20.2350), (44.6580, 20.1880), (44.6820, 20.2150),
+        (44.6300, 20.2100), (44.6650, 20.2450),
+    ],
+    "Lazarevac": [
+        (44.3800, 20.2569), (44.3680, 20.2430), (44.3930, 20.2700), (44.3620, 20.2650),
+        (44.3980, 20.2350), (44.3720, 20.2800), (44.3850, 20.2250), (44.4000, 20.2600),
+        (44.3580, 20.2550), (44.3920, 20.2900),
+    ],
+    "Pozarevac": [
+        (44.6197, 21.1869), (44.6080, 21.1720), (44.6330, 21.2020), (44.6010, 21.2000),
+        (44.6400, 21.1750), (44.6150, 21.2150), (44.6250, 21.1600), (44.6450, 21.1950),
+        (44.5950, 21.1900), (44.6300, 21.2250),
+    ],
+    "Sombor": [
+        (45.7772, 19.1122), (45.7650, 19.0980), (45.7900, 19.1280), (45.7580, 19.1200),
+        (45.7980, 19.1000), (45.7720, 19.1400), (45.7850, 19.0880), (45.8050, 19.1200),
+        (45.7520, 19.1100), (45.7920, 19.1500),
+    ],
+    "Arandelovac": [
+        (44.3028, 20.5611), (44.2950, 20.5500), (44.3100, 20.5700), (44.2880, 20.5750),
+        (44.3150, 20.5450), (44.3050, 20.5800), (44.2920, 20.5350), (44.3200, 20.5600),
+        (44.2980, 20.5250), (44.3080, 20.5950),
+    ],
+    "Bor": [
+        (44.0769, 22.0958), (44.0650, 22.0800), (44.0900, 22.1100), (44.0580, 22.1050),
+        (44.0850, 22.0700), (44.0700, 22.1200), (44.0950, 22.0900), (44.0620, 22.0650),
+        (44.0780, 22.1300), (44.1000, 22.0800),
+    ],
+    "Borca": [
+        (44.8820, 20.5350), (44.8750, 20.5200), (44.8900, 20.5500), (44.8680, 20.5450),
+        (44.8950, 20.5150), (44.8700, 20.5600), (44.8830, 20.5050), (44.8780, 20.5700),
+        (44.8640, 20.5300), (44.8920, 20.5400),
+    ],
+    "Vrsac": [
+        (45.1167, 21.3000), (45.1050, 21.2860), (45.1300, 21.3150), (45.0980, 21.3100),
+        (45.1380, 21.2900), (45.1120, 21.3280), (45.1230, 21.2750), (45.1450, 21.3050),
+        (45.0920, 21.3000), (45.1300, 21.3380),
+    ],
+    "Zlatibor": [
+        (43.7253, 19.7036), (43.7150, 19.6900), (43.7380, 19.7180), (43.7080, 19.7150),
+        (43.7450, 19.6980), (43.7200, 19.7300), (43.7300, 19.6800), (43.7500, 19.7100),
+        (43.7050, 19.7050), (43.7350, 19.7400),
+    ],
+}
+
+# City slug mapa (za Wolt URL-ove)
+CITY_SLUG_MAP = {
+    "beograd": "belgrade", "belgrade": "belgrade",
+    "novi sad": "novi-sad", "novisad": "novi-sad",
+    "nis": "nis", "niš": "nis",
+    "kragujevac": "kragujevac",
+    "cacak": "cacak", "čačak": "cacak",
+    "pancevo": "pancevo", "pančevo": "pancevo",
+    "subotica": "subotica",
+    "zrenjanin": "zrenjanin",
+    "novi pazar": "novi-pazar", "novipazar": "novi-pazar",
+    "krusevac": "krusevac", "kruševac": "krusevac",
+    "leskovac": "leskovac",
+    "valjevo": "valjevo",
+    "smederevo": "smederevo",
+    "uzice": "uzice", "užice": "uzice",
+    "kraljevo": "kraljevo",
+    "jagodina": "jagodina",
+    "obrenovac": "obrenovac",
+    "lazarevac": "lazarevac",
+    "pozarevac": "pozarevac", "požarevac": "pozarevac",
+    "sombor": "sombor",
+    "arandelovac": "arandelovac", "aranđelovac": "arandelovac",
+    "bor": "bor",
+    "borca": "borca", "borča": "borca",
+    "vrsac": "vrsac", "vršac": "vrsac",
+    "zlatibor": "zlatibor",
+}
+
+def _detect_city_coords(lat: float, lon: float, city_raw: str) -> tuple:
+    """
+    Na osnovu geocodiranog grada detektuje koji CITY_MULTI_COORDS da koristi.
+    Vraća (city_key, multi_coords, city_wolt_slug).
+    Ako nema poklapanja, vraća fallback sa jednom koordinatom.
+    """
+    city_norm = remove_accents(cyrillic_to_latin(city_raw)).lower().strip()
+
+    # Direktno poklapanje po imenu
+    for key in CITY_MULTI_COORDS:
+        key_norm = remove_accents(cyrillic_to_latin(key)).lower()
+        if key_norm == city_norm or city_norm.startswith(key_norm) or key_norm.startswith(city_norm):
+            slug = CITY_SLUG_MAP.get(key_norm, key_norm.replace(" ", "-"))
+            return key, CITY_MULTI_COORDS[key], slug
+
+    # Fallback: jedna koordinata, slug iz geocodiranog naziva
+    slug = CITY_SLUG_MAP.get(city_norm, city_norm.replace(" ", "-"))
+    return city_raw, [(lat, lon)], slug
+
+# ── Wolt HTTP session ─────────────────────────────────────────────────────────
+WOLT_FETCH_WORKERS = 4   # simultanih promo HTTP zahteva
 
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -348,8 +528,6 @@ BROWSER_HEADERS = {
     "W-PlatformType": "Web",
     "W-Wolt-Session-Id": "wolt-monitor-session",
 }
-
-WOLT_FETCH_WORKERS = 6   # simultanih promo HTTP zahteva
 
 wolt_session = requests.Session()
 wolt_session.headers.update(BROWSER_HEADERS)
@@ -450,7 +628,7 @@ def _fetch_url(ts, url: str, label: str) -> tuple:
 
 def _parse_dynamic_with_item_discount(data: dict) -> list:
     """
-    Precizno parsiranje Wolt dynamic API odgovora — isti algoritam kao u promo.py.
+    Precizno parsiranje Wolt dynamic API odgovora.
     Čita venue_raw.discounts, venue.banners i venue.offer_assistant.
     """
     akcije = []
@@ -560,19 +738,20 @@ def _fetch_one_wolt(slug: str, lat: float, lon: float, feed_akcije: list) -> tup
         akcije_str = "\n".join(feed_akcije)
     return slug, akcije_str
 
-# ================= NOVI WOLT SCRAPER (requests-based, bez Playwright) =================
+# ================= WOLT SCRAPER (requests-based, bez Playwright) =================
 def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -> list:
     """
     Čisti requests-based Wolt scraper.
-    1. Geocodira adresu → lat/lon
-    2. Paginovano preuzima sve restorane iz feed API-ja
-    3. Konkurentno preuzima dynamic API za svaki restoran (promocije)
+    1. Geocodira adresu → lat/lon + detektuje grad
+    2. Koristi multi-koordinate za taj grad (kao promo.py) — daleko bolji pokrivač
+    3. Paginovano preuzima sve restorane iz feed API-ja kroz sve koordinate
+    4. Konkurentno preuzima dynamic API za svaki restoran (promocije)
     Vraća listu dict-ova kompatibilnih sa ostatkom skripte.
     """
     import urllib.request as _urllib_req
     import json as _json
 
-    log_msg(f"[WOLT] Geocoding address: {address}...", log_ph)
+    print(f"[WOLT] Geocoding address: {address}...")
 
     custom_agent = 'DeliveryMonitorApp/7.0 (wolt_scraper)'
     geo_data = []
@@ -588,119 +767,132 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
             with _urllib_req.urlopen(req2) as response2:
                 geo_data = _json.loads(response2.read().decode())
     except Exception as e:
-        log_msg(f"[WOLT ERROR] Geocoding failed: {e}", log_ph)
+        print(f"[WOLT ERROR] Geocoding failed: {e}")
         return []
 
     if not geo_data:
-        log_msg(f"[WOLT ERROR] Cannot find coordinates for: {address}", log_ph)
+        print(f"[WOLT ERROR] Cannot find coordinates for: {address}")
         return []
 
-    lat = float(geo_data[0]["lat"])
-    lon = float(geo_data[0]["lon"])
-    city_raw = geo_data[0].get("address", {}).get("city",
-               geo_data[0].get("address", {}).get("town", "belgrade"))
-    city_slug = normalize_name(cyrillic_to_latin(city_raw))
-    log_msg(f"[WOLT] Coordinates: {lat}, {lon} (city: {city_slug}). Loading restaurants...", log_ph)
+    geo_lat = float(geo_data[0]["lat"])
+    geo_lon = float(geo_data[0]["lon"])
+    addr_details = geo_data[0].get("address", {})
+    city_raw = (
+        addr_details.get("city") or
+        addr_details.get("town") or
+        addr_details.get("village") or
+        addr_details.get("municipality") or
+        "Belgrade"
+    )
 
-    # ── Korak 1: Feed paginacija ──────────────────────────────────────────────
+    # Detektuj grad i uzmi multi-koordinate
+    city_key, multi_coords, city_wolt_slug = _detect_city_coords(geo_lat, geo_lon, city_raw)
+    print(f"[WOLT] Coordinates: {geo_lat:.4f},{geo_lon:.4f} | City: {city_key} | "
+          f"Locations: {len(multi_coords)} | Slug: {city_wolt_slug}")
+
+    # Primarna koordinata (za dynamic API pozive)
+    primary_lat, primary_lon = multi_coords[0]
+
+    # ── Korak 1: Feed paginacija kroz sve koordinate ──────────────────────────
     restaurants = {}
-    skip = 0
-    page_size = 40
-    max_pages = 30
 
-    for page_num in range(max_pages):
-        endpoint = f"https://restaurant-api.wolt.com/v1/pages/restaurants?lat={lat}&lon={lon}&skip={skip}"
-        data, status = wolt_get(endpoint)
-        items_in_response = 0
+    for loc_idx, (lat, lon) in enumerate(multi_coords):
+        loc_label = f"lok.{loc_idx+1}/{len(multi_coords)}"
+        skip = 0
+        page_size = 40
 
-        if data:
-            for section in data.get("sections", []):
-                for item in section.get("items", []):
-                    venue = item.get("venue")
-                    if not venue:
-                        continue
-                    name = venue.get("name", "")
-                    slug = venue.get("slug", "")
-                    if not name or not slug or slug in restaurants:
-                        continue
-                    items_in_response += 1
+        for page_num in range(50):  # max 50 stranica po lokaciji (kao u promo.py)
+            count_before = len(restaurants)
+            endpoint = f"https://restaurant-api.wolt.com/v1/pages/restaurants?lat={lat}&lon={lon}&skip={skip}"
+            data, _status = wolt_get(endpoint)
+            items_in_response = 0
 
-                    status_val = "Open" if venue.get("online") else "Closed"
-                    rating_obj = venue.get("rating") or {}
-                    r_score    = rating_obj.get("score", "-") if isinstance(rating_obj, dict) else "-"
-                    est        = venue.get("estimate_range") or venue.get("estimate")
-                    time_str   = f"{est} min" if est else "-"
+            if data:
+                for section in data.get("sections", []):
+                    for item in section.get("items", []):
+                        venue = item.get("venue")
+                        if not venue:
+                            continue
+                        name = venue.get("name", "")
+                        slug = venue.get("slug", "")
+                        if not name or not slug or slug in restaurants:
+                            continue
+                        items_in_response += 1
 
-                    # Numerička vrednost vremena
-                    time_num = np.nan
-                    if est:
-                        try:
-                            parts = str(est).split('-')
-                            if len(parts) == 2:
-                                time_num = (int(parts[0]) + int(parts[1])) / 2.0
-                            else:
-                                time_num = float(parts[0])
-                        except Exception:
-                            pass
+                        status_val = "Open" if venue.get("online") else "Closed"
+                        rating_obj = venue.get("rating") or {}
+                        r_score    = rating_obj.get("score", "-") if isinstance(rating_obj, dict) else "-"
+                        est        = venue.get("estimate_range") or venue.get("estimate")
+                        time_str   = f"{est} min" if est else "-"
 
-                    # Feed-nivo akcije i novo badge
-                    feed_akcije = []
-                    novo_status = False
-                    for badge in venue.get("badges", []):
-                        txt = badge.get("text", "")
-                        if txt:
-                            if txt.lower() in ["novo", "new"]:
+                        # Numerička vrednost vremena dostave
+                        time_num = np.nan
+                        if est:
+                            try:
+                                parts = str(est).split('-')
+                                if len(parts) == 2:
+                                    time_num = (int(parts[0]) + int(parts[1])) / 2.0
+                                else:
+                                    time_num = float(parts[0])
+                            except Exception:
+                                pass
+
+                        # Feed-nivo akcije i novo badge
+                        feed_akcije = []
+                        novo_status = False
+                        for badge in venue.get("badges", []):
+                            txt = badge.get("text", "")
+                            if txt:
+                                if txt.lower() in ["novo", "new"]:
+                                    novo_status = True
+                                else:
+                                    feed_akcije.append(f"• {txt}")
+                        label = venue.get("label", "")
+                        if label:
+                            if label.lower() in ["novo", "new"]:
                                 novo_status = True
                             else:
-                                feed_akcije.append(f"• {txt}")
-                    label = venue.get("label", "")
-                    if label:
-                        if label.lower() in ["novo", "new"]:
-                            novo_status = True
+                                feed_akcije.append(f"• {label}")
+
+                        # Link
+                        link_target = item.get("link", {}).get("target", "") if isinstance(item.get("link"), dict) else ""
+                        if link_target.startswith("http"):
+                            link = link_target
+                        elif link_target.startswith("/"):
+                            link = f"https://wolt.com{link_target}"
                         else:
-                            feed_akcije.append(f"• {label}")
+                            link = f"https://wolt.com/en/srb/{city_wolt_slug}/restaurant/{slug}"
 
-                    link_target = item.get("link", {}).get("target", "")
-                    if link_target.startswith("http"):
-                        link = link_target
-                    elif link_target.startswith("/"):
-                        link = f"https://wolt.com{link_target}"
-                    else:
-                        link = f"https://wolt.com/en/srb/{city_slug}/restaurant/{slug}"
+                        restaurants[slug] = {
+                            "Address":       address,
+                            "Platform":      "Wolt",
+                            "Name":          remove_accents(name),
+                            "Rating":        str(r_score),
+                            "Delivery Time": time_str,
+                            "Promo":         "\n".join(feed_akcije) if feed_akcije else "-",
+                            "Status":        status_val,
+                            "Time_Num":      time_num,
+                            "Is_New":        novo_status,
+                            "Link":          link,
+                            "_slug":         slug,
+                            "_feed_akcije":  feed_akcije,
+                        }
 
-                    restaurants[slug] = {
-                        "Address":        address,
-                        "Platform":       "Wolt",
-                        "Name":           remove_accents(name),
-                        "Rating":         str(r_score),
-                        "Delivery Time":  time_str,
-                        "Promo":          "\n".join(feed_akcije) if feed_akcije else "-",
-                        "Status":         status_val,
-                        "Time_Num":       time_num,
-                        "Is_New":         novo_status,
-                        "Link":           link,
-                        "_slug":          slug,
-                        "_feed_akcije":   feed_akcije,
-                    }
+            new_this_page = len(restaurants) - count_before
+            print(f"[WOLT] {loc_label} | page {page_num+1} | +{new_this_page} | total {len(restaurants)}")
 
-        log_msg(f"[WOLT] Page {page_num+1}: +{items_in_response} restaurants (total {len(restaurants)})", log_ph)
-        if live_ph and live_state is not None:
-            live_state["Wolt"] = len(restaurants)
-            refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address)
+            if items_in_response == 0:
+                break
+            skip += page_size
+            time.sleep(random.uniform(0.5, 1.8))
 
-        if items_in_response == 0:
-            break
-        skip += page_size
-        time.sleep(random.uniform(0.5, 1.5))
+        print(f"[WOLT] Location {loc_idx+1}/{len(multi_coords)} done — total restaurants: {len(restaurants)}")
 
     if not restaurants:
-        log_msg(f"[WOLT ERROR] No restaurants found for {address}", log_ph)
+        print(f"[WOLT ERROR] No restaurants found for {address}")
         return []
 
-    log_msg(f"[WOLT] Fetched {len(restaurants)} restaurants. Loading promotions...", log_ph)
-    if live_ph and live_state is not None:
-        refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address,
-                        custom_text=f"📍 {len(restaurants)} Wolt restaurants loaded. Scanning promotions...")
+    print(f"[WOLT] Feed done: {len(restaurants)} restaurants. Loading promotions...")
 
     # ── Korak 2: Konkurentno preuzimanje dynamic API (promocije) ─────────────
     slugs = list(restaurants.keys())
@@ -710,7 +902,7 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
     with ThreadPoolExecutor(max_workers=WOLT_FETCH_WORKERS) as executor:
         futures = {
             executor.submit(
-                _fetch_one_wolt, slug, lat, lon,
+                _fetch_one_wolt, slug, primary_lat, primary_lon,
                 restaurants[slug]["_feed_akcije"]
             ): slug for slug in slugs
         }
@@ -722,20 +914,16 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
                 pass
             completed += 1
             if completed % 20 == 0 or completed == total:
-                log_msg(f"[WOLT] Promotions: {completed}/{total}", log_ph)
+                print(f"[WOLT] Promotions: {completed}/{total}")
 
-    # ── Čišćenje internih ključeva ─────────────────────────────────────────────
+    # ── Čišćenje internih ključeva i vraćanje rezultata ───────────────────────
     result = []
     for r in restaurants.values():
         r.pop("_slug", None)
         r.pop("_feed_akcije", None)
         result.append(r)
 
-    log_msg(f"[WOLT] Done. {len(result)} restaurants scanned.", log_ph)
-    if live_ph and live_state is not None:
-        live_state["Wolt"] = len(result)
-        refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address)
-
+    print(f"[WOLT] Done. {len(result)} restaurants scanned for '{address}'.")
     return result
 
 # ---------------- SPARTAN MODE: FAKE PIXEL (za Glovo) ----------------
@@ -934,22 +1122,21 @@ async def scan_process(addresses, log_ph, live_ph, live_state, generate_pdf=Fals
             all_data.extend(r_glovo)
             await context_glovo.close()
 
-            # ── WOLT (novi čisti requests scraper, bez Playwright) ──────────
-            # VAŽNO: log_ph i live_ph se NE prosleđuju u thread jer Streamlit
+            # ── WOLT (novi čisti requests scraper sa multi-koordinatama) ─────
+            # VAŽNO: log_ph i live_ph se NE prosleđuju jer Streamlit
             # ne dozvoljava UI pozive van glavnog thread-a (NoSessionContext).
-            # Samo print() logovanje radi bezbedno iz threada.
-            log_msg("🚲 Calling WOLT API (requests)...", log_ph)
+            log_msg("🚲 Calling WOLT API (requests + multi-coords)...", log_ph)
             loop = asyncio.get_event_loop()
             r_wolt = await loop.run_in_executor(
                 None,
                 scrape_wolt_sync,
-                adr, None, None, None   # log_ph=None, live_ph=None, live_state=None
+                adr, None, None, None
             )
             # Ažuriramo live UI tek kad se thread završi (bezbedno, u async kontekstu)
             if live_ph is not None and live_state is not None:
                 live_state["Wolt"] = len(r_wolt)
                 refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], adr)
-            log_msg(f"[WOLT] {len(r_wolt)} restaurants loaded for {adr}.", log_ph)
+            log_msg(f"[WOLT] ✅ {len(r_wolt)} restaurants loaded for {adr}.", log_ph)
             all_data.extend(r_wolt)
 
         await browser.close()
