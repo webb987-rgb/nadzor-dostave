@@ -14,6 +14,9 @@ WOLT_FETCH_WORKERS = 2          # smanji sa 6 na 2 — isti kao u promo.py (FETC
 # BLOK 2 — zameni celu funkciju make_thread_session()
 #          Dodata podrška za opcioni _scan_cookie.txt (kao u promo.py)
 # ─────────────────────────────────────────────────────────────────────────────
+import requests
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def make_thread_session() -> requests.Session:
     s = requests.Session()
