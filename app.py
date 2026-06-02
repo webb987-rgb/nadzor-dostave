@@ -652,7 +652,6 @@ def scrape_wolt_sync(address: str, fast_mode: bool = False) -> list:
         addr_details.get("village") or addr_details.get("municipality") or "Belgrade"
     )
 
-    # Koristi se detekcija grada samo zbog slug-a, a multi_coords se menja na isključivo JEDNU tačnu unetu lokaciju
     city_key, _, city_wolt_slug = _detect_city_coords(geo_lat, geo_lon, city_raw)
     multi_coords = [(geo_lat, geo_lon)]
     
@@ -1023,7 +1022,6 @@ async def scan_process(addresses, log_ph, live_ph, live_state, generate_pdf=Fals
             wolt_progress_ph.empty()
 
             try:
-                # Timeout podignut sa 5 na 60 sekundi da bi se uspešno završila kompletna pretraga bez gubljenja podataka
                 r_wolt = await asyncio.wait_for(asyncio.shield(wolt_task), timeout=60)
             except (asyncio.TimeoutError, Exception) as e:
                 log_msg(f"[WOLT] ⚠️ Error/Timeout: {e}", log_ph)
@@ -1214,7 +1212,7 @@ if st.session_state.is_running or st.session_state.loaded_history:
             hist_df = st.session_state.df_history.copy()
             if not hist_df.empty:
                 c_h = hist_df if chart_addr == "All addresses" else hist_df[hist_df["Address"] == chart_addr]
-                if not c_h.empty && 'Date' in c_h.columns && 'Time' in c_h.columns:
+                if not c_h.empty and 'Date' in c_h.columns and 'Time' in c_h.columns:
                     c_h['Datetime'] = pd.to_datetime(c_h['Date'] + ' ' + c_h['Time'])
                     min_d = c_h['Datetime'].min().date()
                     max_d = c_h['Datetime'].max().date()
@@ -1253,7 +1251,7 @@ if st.session_state.is_running or st.session_state.loaded_history:
                 styles = [''] * len(row)
                 if 'Status' in row.index:
                     styles[row.index.get_loc('Status')] = 'color: #27ae60; font-weight: bold;' if row['Status'] == 'Open' else 'color: #e74c3c; font-weight: bold;'
-                if 'Promo' in row.index && row['Promo'] != '-':
+                if 'Promo' in row.index and row['Promo'] != '-':
                     styles[row.index.get_loc('Promo')] = 'color: #8e44ad; font-weight: bold;'
                 return styles
             st.dataframe(disp_df.style.apply(style_rows, axis=1), use_container_width=True, hide_index=True, height=800,
@@ -1285,7 +1283,7 @@ if st.session_state.is_running or st.session_state.loaded_history:
         with tab_promo:
             unique_promos = set()
             for promo_str in c_df['Promo']:
-                if pd.notna(promo_str) && str(promo_str) != "-":
+                if pd.notna(promo_str) and str(promo_str) != "-":
                     for a in str(promo_str).split('\n'):
                         cl = a.replace("• ", "").strip()
                         if cl: unique_promos.add(cl)
