@@ -362,10 +362,7 @@ def _detect_city_coords(lat: float, lon: float, city_raw: str) -> tuple:
     return city_raw, [(lat, lon)], CITY_SLUG_MAP.get(city_raw, slug_raw)
 
 # ── Wolt HTTP session — IDENTIČAN promo.py pristupu ──────────────────────────
-# U promo.py globalni session se zove `session`, ne `wolt_session`.
-# Isti semafor pristup sa FETCH_WORKERS = 2.
-
-WOLT_FETCH_WORKERS = 2  # isto kao FETCH_WORKERS u promo.py
+WOLT_FETCH_WORKERS = 2
 
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -377,7 +374,6 @@ BROWSER_HEADERS = {
     "W-Wolt-Session-Id": "wolt-monitor-session",
 }
 
-# Jedan globalni requests.Session — tačno kao u promo.py
 session = requests.Session()
 session.headers.update(BROWSER_HEADERS)
 
@@ -388,12 +384,10 @@ _throttle_until = 0.0
 _throttle_lock  = threading.Lock()
 _fetch_log_lock = threading.Lock()
 
-# Globalni semafor — isti pristup kao u promo.py
 _global_http_sem = threading.Semaphore(WOLT_FETCH_WORKERS)
 
 
 def _refresh_wolt_session() -> bool:
-    """Identično sa promo.py — obnavlja session kroz anonimni init poziv."""
     global _last_refresh_time
     with _session_lock:
         now = time.time()
@@ -412,7 +406,6 @@ def _refresh_wolt_session() -> bool:
 
 
 def wolt_get(url: str) -> tuple:
-    """Identično sa promo.py."""
     try:
         with _global_http_sem:
             r = session.get(url, timeout=15)
@@ -431,7 +424,6 @@ def wolt_get(url: str) -> tuple:
 
 
 def make_thread_session() -> requests.Session:
-    """Identično sa promo.py — čita cookie iz fajla ako postoji."""
     s = requests.Session()
     for k, v in session.headers.items():
         s.headers[k] = v
@@ -469,10 +461,6 @@ def _set_throttle(seconds: float):
 
 
 def _fetch_url(ts, url: str, label: str, stop_event: threading.Event) -> tuple:
-    """
-    Identično sa promo.py — prima stop_event i proverava ga pre svakog pokušaja.
-    Ovo je KLJUČNA razlika u odnosu na staru verziju koda.
-    """
     for attempt in range(4):
         if stop_event.is_set():
             return None, 0
@@ -502,7 +490,6 @@ def _fetch_url(ts, url: str, label: str, stop_event: threading.Event) -> tuple:
 
 
 def _parse_dynamic_with_item_discount(data: dict) -> list:
-    """Identično sa promo.py."""
     akcije = []
     seen = set()
     ignore_texts = {
@@ -577,10 +564,6 @@ def _parse_dynamic_with_item_discount(data: dict) -> list:
 
 
 def _fetch_one_wolt(slug: str, lat: float, lon: float, feed_akcije: list, stop_event: threading.Event) -> tuple:
-    """
-    Identično sa _fetch_one u promo.py.
-    KLJUČNA razlika: prima stop_event i prosleđuje ga _fetch_url.
-    """
     if stop_event.is_set():
         return slug, "-"
     ts = make_thread_session()
@@ -627,18 +610,10 @@ def _clear_wolt_progress():
     try: WOLT_PROGRESS_FILE.unlink(missing_ok=True)
     except: pass
 
-# ================= WOLT SCRAPER — logika identična fetch_city() iz promo.py =================
+# ================= WOLT SCRAPER — IZMENJENO DA KORISTI SAMO UNETU ADRESU =================
 def scrape_wolt_sync(address: str, fast_mode: bool = False) -> list:
-    """
-    Requests-based Wolt scraper koji koristi istu logiku kao fetch_city() u promo.py.
-    fast_mode=True: preskače dynamic API (samo feed) — ~30s
-    fast_mode=False: puni detaljan sken sa promocijama — sporiji ali kompletan
-    Piše live progress u _wolt_progress.json za prikaz u UI-u.
-    """
     import urllib.request as _urllib_req
     import json as _json
-
-    MAX_LOCS = 3 if fast_mode else 5
 
     stop_event = threading.Event()
 
@@ -677,11 +652,13 @@ def scrape_wolt_sync(address: str, fast_mode: bool = False) -> list:
         addr_details.get("village") or addr_details.get("municipality") or "Belgrade"
     )
 
-    city_key, multi_coords, city_wolt_slug = _detect_city_coords(geo_lat, geo_lon, city_raw)
-    multi_coords = multi_coords[:MAX_LOCS]
+    # Koristi se detekcija grada samo zbog slug-a, a multi_coords se menja na isključivo JEDNU tačnu unetu lokaciju
+    city_key, _, city_wolt_slug = _detect_city_coords(geo_lat, geo_lon, city_raw)
+    multi_coords = [(geo_lat, geo_lon)]
+    
     print(f"[WOLT] Coords: {geo_lat:.4f},{geo_lon:.4f} | City: {city_key} | "
-          f"Locations: {len(multi_coords)} (max {MAX_LOCS}) | Slug: {city_wolt_slug}")
-    _write_wolt_progress({"status": f"📍 City: {city_key} | {len(multi_coords)} locations | loading feed...", "found": 0, "total": 0, "promo_done": 0, "fast_mode": fast_mode})
+          f"Locations: 1 (Exact address) | Slug: {city_wolt_slug}")
+    _write_wolt_progress({"status": f"📍 City: {city_key} | Exact address | loading feed...", "found": 0, "total": 0, "promo_done": 0, "fast_mode": fast_mode})
 
     primary_lat, primary_lon = multi_coords[0]
 
@@ -694,7 +671,7 @@ def scrape_wolt_sync(address: str, fast_mode: bool = False) -> list:
         loc_label = f"lok.{loc_idx+1}/{len(multi_coords)}"
         skip = 0
 
-        for page_num in range(50):  # max 50 stranica po lokaciji (isto kao promo.py)
+        for page_num in range(50):
             if stop_event.is_set():
                 break
             count_before = len(restaurants)
@@ -756,7 +733,7 @@ def scrape_wolt_sync(address: str, fast_mode: bool = False) -> list:
             new_this_page = len(restaurants) - count_before
             print(f"[WOLT] {loc_label} | page {page_num+1} | +{new_this_page} | total {len(restaurants)}")
             _write_wolt_progress({
-                "status": f"📡 Feed | {loc_label} | str.{page_num+1} | +{new_this_page} novih",
+                "status": f"📡 Feed | str.{page_num+1} | +{new_this_page} novih",
                 "found": len(restaurants), "total": 0, "promo_done": 0, "fast_mode": fast_mode
             })
 
@@ -764,12 +741,6 @@ def scrape_wolt_sync(address: str, fast_mode: bool = False) -> list:
                 break
             skip += 40
             time.sleep(random.uniform(0.5, 1.8))
-
-        print(f"[WOLT] Location {loc_idx+1}/{len(multi_coords)} done — total: {len(restaurants)}")
-        _write_wolt_progress({
-            "status": f"✅ Lokacija {loc_idx+1}/{len(multi_coords)} gotova | ukupno: {len(restaurants)}",
-            "found": len(restaurants), "total": 0, "promo_done": 0, "fast_mode": fast_mode
-        })
 
     if not restaurants:
         print(f"[WOLT ERROR] No restaurants found for {address}")
@@ -1052,7 +1023,8 @@ async def scan_process(addresses, log_ph, live_ph, live_state, generate_pdf=Fals
             wolt_progress_ph.empty()
 
             try:
-                r_wolt = await asyncio.wait_for(asyncio.shield(wolt_task), timeout=5)
+                # Timeout podignut sa 5 na 60 sekundi da bi se uspešno završila kompletna pretraga bez gubljenja podataka
+                r_wolt = await asyncio.wait_for(asyncio.shield(wolt_task), timeout=60)
             except (asyncio.TimeoutError, Exception) as e:
                 log_msg(f"[WOLT] ⚠️ Error/Timeout: {e}", log_ph)
                 r_wolt = []
@@ -1242,7 +1214,7 @@ if st.session_state.is_running or st.session_state.loaded_history:
             hist_df = st.session_state.df_history.copy()
             if not hist_df.empty:
                 c_h = hist_df if chart_addr == "All addresses" else hist_df[hist_df["Address"] == chart_addr]
-                if not c_h.empty and 'Date' in c_h.columns and 'Time' in c_h.columns:
+                if not c_h.empty && 'Date' in c_h.columns && 'Time' in c_h.columns:
                     c_h['Datetime'] = pd.to_datetime(c_h['Date'] + ' ' + c_h['Time'])
                     min_d = c_h['Datetime'].min().date()
                     max_d = c_h['Datetime'].max().date()
@@ -1281,7 +1253,7 @@ if st.session_state.is_running or st.session_state.loaded_history:
                 styles = [''] * len(row)
                 if 'Status' in row.index:
                     styles[row.index.get_loc('Status')] = 'color: #27ae60; font-weight: bold;' if row['Status'] == 'Open' else 'color: #e74c3c; font-weight: bold;'
-                if 'Promo' in row.index and row['Promo'] != '-':
+                if 'Promo' in row.index && row['Promo'] != '-':
                     styles[row.index.get_loc('Promo')] = 'color: #8e44ad; font-weight: bold;'
                 return styles
             st.dataframe(disp_df.style.apply(style_rows, axis=1), use_container_width=True, hide_index=True, height=800,
@@ -1313,7 +1285,7 @@ if st.session_state.is_running or st.session_state.loaded_history:
         with tab_promo:
             unique_promos = set()
             for promo_str in c_df['Promo']:
-                if pd.notna(promo_str) and str(promo_str) != "-":
+                if pd.notna(promo_str) && str(promo_str) != "-":
                     for a in str(promo_str).split('\n'):
                         cl = a.replace("• ", "").strip()
                         if cl: unique_promos.add(cl)
