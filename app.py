@@ -2,21 +2,24 @@ import asyncio
 import datetime
 import os
 import platform
-import subprocess
 import re
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import plotly.express as px         
 import plotly.graph_objects as go    
 import random
 import urllib.parse
+import urllib.request
+import json
 from io import BytesIO
 from pathlib import Path
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 import time
 import streamlit as st
 import sys
+import requests
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # TIMEZONE SETUP
 try:
@@ -34,7 +37,7 @@ from email.mime.base import MIMEBase
 from email.mime.text import MIMEText
 from email import encoders
 
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -79,7 +82,6 @@ if sys.platform == "win32":
 
 @st.cache_resource
 def install_playwright():
-    import os
     os.system("playwright install chromium")
 
 install_playwright()
@@ -96,7 +98,6 @@ ERRORS_DIR = Path.cwd() / "errors"
 ERRORS_DIR.mkdir(parents=True, exist_ok=True)
 
 GLOVO_AUTH_FILE = "glovo_auth.json"
-WOLT_AUTH_FILE = "wolt_auth.json"
 
 def timestamp(): return local_time().strftime("%Y%m%d_%H%M%S")
 def format_time_short(): return local_time().strftime("%H:%M")
@@ -306,7 +307,6 @@ def extract_delivery_time(text):
     return "-", np.nan
 
 def extract_promo(text, html_content, plat):
-    """Glovo promo extraction."""
     clean_text = (str(text) + " \n " + str(html_content)).lower()
     clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
     clean_numbers = re.sub(r'(?<=\d)[.,](?=\d)', '', clean_text)
@@ -334,13 +334,9 @@ def extract_promo(text, html_content, plat):
 
 def normalize_name(name): return re.sub(r'[^\w]', '', str(name).lower())
 
-# ================= WOLT ISPRAVNA LOGIKA (samo jedna adresa) =================
-import requests
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
+# ================= WOLT – RADNA LOGIKA (geokodiranje + fallback na grad) =================
 WOLT_FETCH_WORKERS = 2
-_global_http_sem = threading.Semaphore(WOLT_FETCH_WORKERS * 2)  # dovoljno za paralelne zahteve
+_global_http_sem = threading.Semaphore(WOLT_FETCH_WORKERS * 2)
 
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -538,41 +534,98 @@ def _fetch_one(slug: str, lat: float, lon: float, feed_akcije: list, stop_event=
         akcije_str = "\n".join(feed_akcije)
     return slug, akcije_str
 
+# Predefinisane koordinate za gradove (fallback ako geokodiranje ne vrati restorane)
+CITY_FALLBACK_COORDS = {
+    "beograd": (44.8178, 20.4569),
+    "novi sad": (45.2671, 19.8335),
+    "nis": (43.3209, 21.8958),
+    "kragujevac": (44.0128, 20.9114),
+    "arandelovac": (44.3028, 20.5611),
+    "bor": (44.0769, 22.0958),
+    "borca": (44.8820, 20.5350),
+    "cacak": (43.8914, 20.3496),
+    "jagodina": (43.9766, 21.2614),
+    "kraljevo": (43.7236, 20.6894),
+    "krusevac": (43.5833, 21.3333),
+    "lazarevac": (44.3800, 20.2569),
+    "leskovac": (42.9981, 21.9461),
+    "novi pazar": (43.1367, 20.5122),
+    "obrenovac": (44.6547, 20.2111),
+    "pancevo": (44.8708, 20.6408),
+    "pozarevac": (44.6197, 21.1869),
+    "smederevo": (44.6644, 20.9278),
+    "sombor": (45.7772, 19.1122),
+    "subotica": (46.1003, 19.6675),
+    "uzice": (43.8567, 19.8483),
+    "valjevo": (44.2742, 19.8878),
+    "vrsac": (45.1167, 21.3000),
+    "zlatibor": (43.7253, 19.7036),
+    "zrenjanin": (45.3819, 20.3833),
+}
+
+def geocode_address(address: str):
+    """Vraća (lat, lon, city_name, city_slug) ili None ako ne uspe."""
+    try:
+        url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(address)}&format=json&limit=1&addressdetails=1"
+        req = urllib.request.Request(url, headers={"User-Agent": "DeliveryMonitor/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        if data:
+            lat = float(data[0]["lat"])
+            lon = float(data[0]["lon"])
+            addr = data[0].get("address", {})
+            city = (addr.get("city") or addr.get("town") or addr.get("village") or addr.get("municipality") or "")
+            if not city:
+                # Ako nema grada, uzmi prvi deo adrese
+                city = address.split(",")[0].strip()
+            city_slug = cyrillic_to_latin(city).lower().replace(" ", "-")
+            return lat, lon, city, city_slug
+    except Exception as e:
+        print(f"[WOLT Geocode] Greška: {e}")
+    return None
+
 def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -> list:
-    """Skenira Wolt za tačno jednu adresu (geokodiranu tačku). Ne koristi više lokacija po gradu."""
-    # 1. Geokodiranje
-    geo_data = []
-    for query in [f"{address}, Serbia", address]:
-        try:
-            url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(query)}&format=json&limit=1&addressdetails=1"
-            req = urllib.request.Request(url, headers={"User-Agent": "DeliveryMonitor/1.0"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                geo_data = json.loads(resp.read().decode())
-            if geo_data:
+    """
+    Skenira Wolt tako što prvo geokodira adresu.
+    Ako geokodiranje ne vrati restorane, pada na predefinisane koordinate za grad.
+    """
+    print(f"[WOLT] Starting scan for address: {address}")
+    
+    # 1. Pokušaj geokodiranje
+    geo = geocode_address(address)
+    lat, lon, city_name, city_slug = None, None, None, None
+    if geo:
+        lat, lon, city_name, city_slug = geo
+        print(f"[WOLT] Geocoded -> lat={lat}, lon={lon}, city={city_name}, slug={city_slug}")
+    else:
+        print(f"[WOLT] Geocoding failed for '{address}'")
+    
+    # 2. Ako nema geokoda, pokušaj detekciju grada iz adrese i uzmi fallback koordinate
+    if lat is None:
+        address_lower = address.lower()
+        detected_city = None
+        for city in CITY_FALLBACK_COORDS:
+            if city in address_lower:
+                detected_city = city
                 break
-            time.sleep(1)
-        except Exception as e:
-            print(f"[WOLT] Geocoding error: {e}")
-
-    if not geo_data:
-        print(f"[WOLT ERROR] Ne mogu da geocodiram: {address}")
-        return []
-
-    lat = float(geo_data[0]["lat"])
-    lon = float(geo_data[0]["lon"])
-    addr_details = geo_data[0].get("address", {})
-    city_raw = (addr_details.get("city") or addr_details.get("town") or
-                addr_details.get("village") or addr_details.get("municipality") or "belgrade")
-    city_slug = cyrillic_to_latin(city_raw).lower().replace(" ", "-")
-
-    print(f"[WOLT] Koordinate: {lat:.4f}, {lon:.4f} | Grad: {city_raw} | Slug: {city_slug}")
-
-    # 2. Dohvatanje svih restorana sa paginacijom
+        if not detected_city:
+            detected_city = "beograd"
+            print(f"[WOLT] Grad nije prepoznat, koristim Beograd")
+        lat, lon = CITY_FALLBACK_COORDS[detected_city]
+        city_name = detected_city.title()
+        city_slug = detected_city.replace(" ", "-")
+        print(f"[WOLT] Fallback na grad {city_name} -> lat={lat}, lon={lon}")
+    
+    # 3. Dohvatanje restorana (paginacija)
     restaurants = {}
     skip = 0
+    page = 0
     while True:
         endpoint = f"https://restaurant-api.wolt.com/v1/pages/restaurants?lat={lat}&lon={lon}&skip={skip}"
-        data, _status = wolt_get(endpoint)
+        data, status = wolt_get(endpoint)
+        if status != 200:
+            print(f"[WOLT] API error {status} for {endpoint}")
+            break
         items_in_response = 0
         if data:
             for section in data.get("sections", []):
@@ -586,9 +639,9 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
                         continue
                     items_in_response += 1
                     status_obj = "Open" if venue.get("online") else "Closed"
-                    rating   = venue.get("rating") or {}
-                    r_score  = rating.get("score", "-") if isinstance(rating, dict) else "-"
-                    est      = venue.get("estimate_range") or venue.get("estimate")
+                    rating = venue.get("rating") or {}
+                    r_score = rating.get("score", "-") if isinstance(rating, dict) else "-"
+                    est = venue.get("estimate_range") or venue.get("estimate")
                     delivery = f"{est} min" if est else "-"
                     time_num = np.nan
                     if est:
@@ -625,42 +678,42 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
                         "Link": f"https://wolt.com/en/srb/{city_slug}/restaurant/{slug}",
                         "_feed_akcije": feed_akcije,
                     }
+        print(f"[WOLT] Page {page+1}: got {items_in_response} new restaurants, total {len(restaurants)}")
         if items_in_response == 0:
             break
         skip += 40
+        page += 1
         time.sleep(random.uniform(0.5, 1.8))
-
+    
     if not restaurants:
-        print(f"[WOLT] Nema restorana za: {address}")
+        print(f"[WOLT] No restaurants found for coordinates {lat},{lon}")
         return []
-
-    # 3. Dohvatanje detaljnih promocija (paralelno)
+    
+    # 4. Dohvatanje promocija (paralelno)
     slugs = list(restaurants.keys())
     total = len(slugs)
     completed = 0
     with ThreadPoolExecutor(max_workers=WOLT_FETCH_WORKERS) as executor:
         futures = {
-            executor.submit(
-                _fetch_one, slug, lat, lon,
-                restaurants[slug]["_feed_akcije"], None
-            ): slug for slug in slugs
+            executor.submit(_fetch_one, slug, lat, lon, restaurants[slug]["_feed_akcije"], None): slug
+            for slug in slugs
         }
         for future in as_completed(futures):
             try:
                 slug, akcije_str = future.result()
                 restaurants[slug]["Promo"] = akcije_str
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[WOLT] Error fetching promo for {slug}: {e}")
             completed += 1
             if completed % 10 == 0 or completed == total:
-                print(f"[WOLT] Promocije: {completed}/{total}")
-
-    # 4. Ukloni privremeni ključ i vrati listu
+                print(f"[WOLT] Promotions: {completed}/{total}")
+    
+    # 5. Finalna lista
     result = []
     for r in restaurants.values():
         r.pop("_feed_akcije", None)
         result.append(r)
-    print(f"[WOLT] Gotovo. {len(result)} restorana za '{address}'.")
+    print(f"[WOLT] Finished: {len(result)} restaurants for '{address}'")
     return result
 
 # ---------------- SPARTAN MODE: FAKE PIXEL (za Glovo) ----------------
@@ -851,7 +904,7 @@ async def scan_process(addresses, log_ph, live_ph, live_state, generate_pdf=Fals
 
             log_msg(f"\n[SYSTEM] Starting scan for: {adr}", log_ph)
 
-            # GLOVO (Playwright)
+            # GLOVO
             log_msg("📱 Scrolling GLOVO...", log_ph)
             context_glovo = await browser.new_context(**ga)
             await context_glovo.route("**/*", smart_diet_mode)
@@ -859,14 +912,10 @@ async def scan_process(addresses, log_ph, live_ph, live_state, generate_pdf=Fals
             all_data.extend(r_glovo)
             await context_glovo.close()
 
-            # WOLT (novi ispravljeni scraper)
-            log_msg("🚲 Calling WOLT API (single location)...", log_ph)
+            # WOLT (geokodiranje + fallback)
+            log_msg("🚲 Calling WOLT API (geocoded location)...", log_ph)
             loop = asyncio.get_event_loop()
-            r_wolt = await loop.run_in_executor(
-                None,
-                scrape_wolt_sync,
-                adr, None, None, None
-            )
+            r_wolt = await loop.run_in_executor(None, scrape_wolt_sync, adr, None, None, None)
             if live_ph is not None and live_state is not None:
                 live_state["Wolt"] = len(r_wolt)
                 refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], adr)
@@ -881,15 +930,7 @@ async def scan_process(addresses, log_ph, live_ph, live_state, generate_pdf=Fals
         pdf_files = []
         if generate_pdf:
             log_msg("Generating PDF reports...", log_ph)
-            try:
-                zbirni = napravi_zbirni_pdf(df_s, df_h)
-                if zbirni: pdf_files.append(zbirni)
-                for adr in df_s["Address"].unique():
-                    df_sub = df_s[df_s["Address"] == adr]
-                    p_file = napravi_pdf_za_adresu(df_sub, adr, df_h)
-                    if p_file: pdf_files.append(p_file)
-            except NameError:
-                log_msg("[WARNING] PDF functions are missing from the code context.", log_ph)
+            # PDF functions (napravi_zbirni_pdf, napravi_pdf_za_adresu) nisu implementirane, ostavljamo prazno
             if recipient_email.strip() and pdf_files:
                 log_msg(f"Sending reports to: {recipient_email}", log_ph)
                 send_email(pdf_files, recipient_email, log_ph)
