@@ -605,20 +605,45 @@ def _fetch_one_wolt(slug: str, lat: float, lon: float, feed_akcije: list, stop_e
     return slug, akcije_str
 
 
+# ── Live progress (piše u JSON fajl, čita ga async UI loop) ──────────────────
+WOLT_PROGRESS_FILE = Path("_wolt_progress.json")
+_wolt_progress_lock = threading.Lock()
+
+def _write_wolt_progress(data: dict):
+    try:
+        tmp = Path("_wolt_progress.json.tmp")
+        tmp.write_text(__import__('json').dumps(data, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(WOLT_PROGRESS_FILE)
+    except Exception:
+        pass
+
+def _read_wolt_progress() -> dict:
+    try:
+        return __import__('json').loads(WOLT_PROGRESS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def _clear_wolt_progress():
+    try: WOLT_PROGRESS_FILE.unlink(missing_ok=True)
+    except: pass
+
 # ================= WOLT SCRAPER — logika identična fetch_city() iz promo.py =================
-def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -> list:
+def scrape_wolt_sync(address: str, fast_mode: bool = False) -> list:
     """
-    Requests-based Wolt scraper koji koristi istu logiku kao fetch_city() u promo.py:
-    - stop_event koji nikad nije set (delivery monitor nema stop za Wolt)
-    - isti paginacioni loop (skip += 40, max 50 stranica)
-    - isti ThreadPoolExecutor sa stop_event proverama
+    Requests-based Wolt scraper koji koristi istu logiku kao fetch_city() u promo.py.
+    fast_mode=True: preskače dynamic API (samo feed) — ~30s
+    fast_mode=False: puni detaljan sken sa promocijama — sporiji ali kompletan
+    Piše live progress u _wolt_progress.json za prikaz u UI-u.
     """
     import urllib.request as _urllib_req
     import json as _json
 
-    # stop_event koji nikad nije set — delivery monitor ne koristi stop za Wolt
+    MAX_LOCS = 3 if fast_mode else 5
+
     stop_event = threading.Event()
 
+    _write_wolt_progress({"status": "🌍 Geocoding...", "found": 0, "total": 0, "promo_done": 0, "fast_mode": fast_mode})
+    print(f"[WOLT] START scrape_wolt_sync za: {address} | fast_mode={fast_mode}")
     print(f"[WOLT] Geocoding: {address}...")
 
     geo_data = []
@@ -636,10 +661,12 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
                 geo_data = _json.loads(response2.read().decode())
     except Exception as e:
         print(f"[WOLT ERROR] Geocoding failed: {e}")
+        _write_wolt_progress({"status": f"❌ Geocoding failed: {e}", "found": 0, "total": 0, "promo_done": 0, "fast_mode": fast_mode})
         return []
 
     if not geo_data:
         print(f"[WOLT ERROR] Cannot find coordinates for: {address}")
+        _write_wolt_progress({"status": f"❌ Cannot geocode: {address}", "found": 0, "total": 0, "promo_done": 0, "fast_mode": fast_mode})
         return []
 
     geo_lat = float(geo_data[0]["lat"])
@@ -651,11 +678,14 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
     )
 
     city_key, multi_coords, city_wolt_slug = _detect_city_coords(geo_lat, geo_lon, city_raw)
-    print(f"[WOLT] Coords: {geo_lat:.4f},{geo_lon:.4f} | City: {city_key} | Locations: {len(multi_coords)} | Slug: {city_wolt_slug}")
+    multi_coords = multi_coords[:MAX_LOCS]
+    print(f"[WOLT] Coords: {geo_lat:.4f},{geo_lon:.4f} | City: {city_key} | "
+          f"Locations: {len(multi_coords)} (max {MAX_LOCS}) | Slug: {city_wolt_slug}")
+    _write_wolt_progress({"status": f"📍 City: {city_key} | {len(multi_coords)} locations | loading feed...", "found": 0, "total": 0, "promo_done": 0, "fast_mode": fast_mode})
 
     primary_lat, primary_lon = multi_coords[0]
 
-    # ── Korak 1: Feed paginacija — identično fetch_city() u promo.py ─────────
+    # ── Korak 1: Feed paginacija ──────────────────────────────────────────────
     restaurants = {}
 
     for loc_idx, (lat, lon) in enumerate(multi_coords):
@@ -725,21 +755,44 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
 
             new_this_page = len(restaurants) - count_before
             print(f"[WOLT] {loc_label} | page {page_num+1} | +{new_this_page} | total {len(restaurants)}")
+            _write_wolt_progress({
+                "status": f"📡 Feed | {loc_label} | str.{page_num+1} | +{new_this_page} novih",
+                "found": len(restaurants), "total": 0, "promo_done": 0, "fast_mode": fast_mode
+            })
 
             if items_in_response == 0:
                 break
-            skip += 40  # identično promo.py (skip += 40)
+            skip += 40
             time.sleep(random.uniform(0.5, 1.8))
 
         print(f"[WOLT] Location {loc_idx+1}/{len(multi_coords)} done — total: {len(restaurants)}")
+        _write_wolt_progress({
+            "status": f"✅ Lokacija {loc_idx+1}/{len(multi_coords)} gotova | ukupno: {len(restaurants)}",
+            "found": len(restaurants), "total": 0, "promo_done": 0, "fast_mode": fast_mode
+        })
 
     if not restaurants:
         print(f"[WOLT ERROR] No restaurants found for {address}")
+        _write_wolt_progress({"status": "⚠️ Nema restorana pronađeno", "found": 0, "total": 0, "promo_done": 0, "fast_mode": fast_mode})
         return []
 
-    print(f"[WOLT] Feed done: {len(restaurants)} restaurants. Loading promotions...")
+    total_found = len(restaurants)
+    print(f"[WOLT] Feed done: {total_found} restaurants.")
 
-    # ── Korak 2: Konkurentni dynamic API — identično promo.py ────────────────
+    # ── Korak 2: Dynamic API za promocije (preskači u fast_mode) ─────────────
+    if fast_mode:
+        print(f"[WOLT] Fast mode — preskačem dynamic API, vraćam feed podatke.")
+        _write_wolt_progress({"status": f"⚡ Fast mode završen | {total_found} restorana", "found": total_found, "total": total_found, "promo_done": total_found, "fast_mode": True})
+        result = []
+        for r in restaurants.values():
+            r.pop("_slug", None)
+            r.pop("_feed_akcije", None)
+            result.append(r)
+        return result
+
+    print(f"[WOLT] Loading promotions for {total_found} restaurants...")
+    _write_wolt_progress({"status": f"🔍 Učitavam promocije (0/{total_found})...", "found": total_found, "total": total_found, "promo_done": 0, "fast_mode": False})
+
     slugs = list(restaurants.keys())
     total = len(slugs)
     completed = 0
@@ -761,8 +814,12 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
             except Exception:
                 pass
             completed += 1
-            if completed % 20 == 0 or completed == total:
+            if completed % 10 == 0 or completed == total:
                 print(f"[WOLT] Promotions: {completed}/{total}")
+                _write_wolt_progress({
+                    "status": f"🔍 Promocije: {completed}/{total} restorana",
+                    "found": total, "total": total, "promo_done": completed, "fast_mode": False
+                })
 
     result = []
     for r in restaurants.values():
@@ -771,6 +828,7 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
         result.append(r)
 
     print(f"[WOLT] Done. {len(result)} restaurants for '{address}'.")
+    _write_wolt_progress({"status": f"✅ Završeno | {len(result)} restorana", "found": len(result), "total": len(result), "promo_done": len(result), "fast_mode": False})
     return result
 
 
@@ -919,9 +977,10 @@ async def scrape_glovo(context_glovo, address, log_ph=None, live_ph=None, live_s
     finally:
         if page: await page.close()
 
-async def scan_process(addresses, log_ph, live_ph, live_state, generate_pdf=False, recipient_email="", debug_mode=False):
+async def scan_process(addresses, log_ph, live_ph, live_state, generate_pdf=False, recipient_email="", debug_mode=False, fast_mode=False):
     all_data = []
     error_screenshots = []
+    _clear_wolt_progress()
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--no-sandbox"])
@@ -956,10 +1015,48 @@ async def scan_process(addresses, log_ph, live_ph, live_state, generate_pdf=Fals
             all_data.extend(r_glovo)
             await context_glovo.close()
 
-            # ── WOLT (requests, logika iz promo.py) ──────────────────────────
-            log_msg("🚲 Calling WOLT API (promo.py logika)...", log_ph)
-            loop = asyncio.get_event_loop()
-            r_wolt = await loop.run_in_executor(None, scrape_wolt_sync, adr, None, None, None)
+            # ── WOLT (requests, sa live progress UI) ─────────────────────────
+            mode_label = "⚡ Fast" if fast_mode else "🔍 Detailed"
+            log_msg(f"🚲 Calling WOLT API ({mode_label} mode)...", log_ph)
+            _clear_wolt_progress()
+
+            # Pokrenemo scraper u pozadini
+            wolt_task = asyncio.create_task(
+                asyncio.to_thread(scrape_wolt_sync, adr, fast_mode)
+            )
+
+            # Live progress UI dok scraper radi
+            wolt_progress_ph = st.empty()
+            while not wolt_task.done():
+                prog = _read_wolt_progress()
+                if prog:
+                    found = prog.get("found", 0)
+                    total_r = prog.get("total", 0)
+                    promo_done = prog.get("promo_done", 0)
+                    status_txt = prog.get("status", "")
+                    pct_feed = min(found / max(total_r, found, 1), 1.0) if found > 0 else 0
+                    pct_promo = promo_done / max(total_r, 1) if total_r > 0 else 0
+
+                    wolt_progress_ph.markdown(f"""
+<div style="background:#f0f8ff; border-radius:10px; padding:12px 18px; border-left:5px solid #00c2e8; margin-bottom:8px;">
+  <b style="color:#00c2e8;">🚲 WOLT — {mode_label} mode</b><br>
+  <span style="font-size:13px; color:#555;">{status_txt}</span><br>
+  <div style="margin-top:6px; background:#ddd; border-radius:4px; height:8px;">
+    <div style="width:{int(pct_feed*100)}%; background:#00c2e8; height:8px; border-radius:4px;"></div>
+  </div>
+  <span style="font-size:12px; color:#888;">Feed: {found} restorana{"  |  Promo: " + str(promo_done) + "/" + str(total_r) if total_r > 0 and not fast_mode else ""}</span>
+</div>
+""", unsafe_allow_html=True)
+                await asyncio.sleep(1.5)
+
+            wolt_progress_ph.empty()
+
+            try:
+                r_wolt = await asyncio.wait_for(asyncio.shield(wolt_task), timeout=5)
+            except (asyncio.TimeoutError, Exception) as e:
+                log_msg(f"[WOLT] ⚠️ Error/Timeout: {e}", log_ph)
+                r_wolt = []
+
             if live_ph is not None and live_state is not None:
                 live_state["Wolt"] = len(r_wolt)
                 refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], adr)
@@ -1012,6 +1109,14 @@ with st.sidebar:
     email_input = st.text_input("📧 Send to email:", placeholder="your@email.com") if generate_pdf else ""
     st.markdown("---")
     debug_mode = st.checkbox("🛠️ Enable Debug Mode", value=False)
+    st.markdown("---")
+    st.markdown("**🚲 Wolt scan mode:**")
+    fast_mode = st.radio(
+        "Wolt mode",
+        options=["⚡ Fast (samo status/vreme, ~1min)", "🔍 Detailed (+ promocije, ~5-8min)"],
+        index=0,
+        label_visibility="collapsed"
+    ) == "⚡ Fast (samo status/vreme, ~1min)"
     st.markdown("---")
     c1, c2 = st.columns(2)
     with c1:
@@ -1087,7 +1192,7 @@ if st.session_state.is_running or st.session_state.loaded_history:
                 live_ui_ph = st.empty()
                 sl = st.empty()
                 live_state = {"Wolt": 0, "Glovo": 0}
-                df, hi, pdf, err_imgs = asyncio.run(scan_process(list_addresses, sl, live_ui_ph, live_state, generate_pdf, email_input, debug_mode))
+                df, hi, pdf, err_imgs = asyncio.run(scan_process(list_addresses, sl, live_ui_ph, live_state, generate_pdf, email_input, debug_mode, fast_mode))
                 if not df.empty:
                     df.to_csv(OUTPUT_DIR / f"Detaljno_{timestamp()}.csv", index=False)
                 live_ui_ph.empty()
