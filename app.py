@@ -334,7 +334,7 @@ def extract_promo(text, html_content, plat):
 
 def normalize_name(name): return re.sub(r'[^\w]', '', str(name).lower())
 
-# ================= WOLT – RADNA LOGIKA (geokodiranje + fallback na grad) =================
+# ================= WOLT – RADNA LOGIKA (geokodiranje + fallback + statusi) =================
 WOLT_FETCH_WORKERS = 2
 _global_http_sem = threading.Semaphore(WOLT_FETCH_WORKERS * 2)
 
@@ -588,17 +588,18 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
     """
     Skenira Wolt tako što prvo geokodira adresu.
     Ako geokodiranje ne vrati restorane, pada na predefinisane koordinate za grad.
+    Statusi se ispisuju u konzolu i u Streamlit log placeholder (ako je prosleđen).
     """
-    print(f"[WOLT] Starting scan for address: {address}")
+    log_msg(f"[WOLT] Starting scan for address: {address}", log_ph)
     
     # 1. Pokušaj geokodiranje
     geo = geocode_address(address)
     lat, lon, city_name, city_slug = None, None, None, None
     if geo:
         lat, lon, city_name, city_slug = geo
-        print(f"[WOLT] Geocoded -> lat={lat}, lon={lon}, city={city_name}, slug={city_slug}")
+        log_msg(f"[WOLT] Geocoded -> lat={lat:.4f}, lon={lon:.4f}, city={city_name}, slug={city_slug}", log_ph)
     else:
-        print(f"[WOLT] Geocoding failed for '{address}'")
+        log_msg(f"[WOLT] Geocoding failed for '{address}'", log_ph)
     
     # 2. Ako nema geokoda, pokušaj detekciju grada iz adrese i uzmi fallback koordinate
     if lat is None:
@@ -610,11 +611,11 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
                 break
         if not detected_city:
             detected_city = "beograd"
-            print(f"[WOLT] Grad nije prepoznat, koristim Beograd")
+            log_msg(f"[WOLT] Grad nije prepoznat, koristim Beograd", log_ph)
         lat, lon = CITY_FALLBACK_COORDS[detected_city]
         city_name = detected_city.title()
         city_slug = detected_city.replace(" ", "-")
-        print(f"[WOLT] Fallback na grad {city_name} -> lat={lat}, lon={lon}")
+        log_msg(f"[WOLT] Fallback na grad {city_name} -> lat={lat:.4f}, lon={lon:.4f}", log_ph)
     
     # 3. Dohvatanje restorana (paginacija)
     restaurants = {}
@@ -624,7 +625,7 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
         endpoint = f"https://restaurant-api.wolt.com/v1/pages/restaurants?lat={lat}&lon={lon}&skip={skip}"
         data, status = wolt_get(endpoint)
         if status != 200:
-            print(f"[WOLT] API error {status} for {endpoint}")
+            log_msg(f"[WOLT] API error {status} for {endpoint}", log_ph)
             break
         items_in_response = 0
         if data:
@@ -678,7 +679,13 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
                         "Link": f"https://wolt.com/en/srb/{city_slug}/restaurant/{slug}",
                         "_feed_akcije": feed_akcije,
                     }
-        print(f"[WOLT] Page {page+1}: got {items_in_response} new restaurants, total {len(restaurants)}")
+        log_msg(f"[WOLT] Page {page+1}: got {items_in_response} new restaurants, total {len(restaurants)}", log_ph)
+        
+        # Ažuriraj live UI (ako postoji) – samo posle svake stranice da ne bi prečesto
+        if live_ph is not None and live_state is not None:
+            live_state["Wolt"] = len(restaurants)
+            refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address)
+        
         if items_in_response == 0:
             break
         skip += 40
@@ -686,8 +693,10 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
         time.sleep(random.uniform(0.5, 1.8))
     
     if not restaurants:
-        print(f"[WOLT] No restaurants found for coordinates {lat},{lon}")
+        log_msg(f"[WOLT] No restaurants found for coordinates {lat},{lon}", log_ph)
         return []
+    
+    log_msg(f"[WOLT] Total restaurants found: {len(restaurants)}. Now fetching promotions...", log_ph)
     
     # 4. Dohvatanje promocija (paralelno)
     slugs = list(restaurants.keys())
@@ -703,17 +712,19 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
                 slug, akcije_str = future.result()
                 restaurants[slug]["Promo"] = akcije_str
             except Exception as e:
-                print(f"[WOLT] Error fetching promo for {slug}: {e}")
+                log_msg(f"[WOLT] Error fetching promo for {slug}: {e}", log_ph)
             completed += 1
             if completed % 10 == 0 or completed == total:
-                print(f"[WOLT] Promotions: {completed}/{total}")
+                log_msg(f"[WOLT] Promotions: {completed}/{total} restaurants", log_ph)
+                # Može se i live UI ažurirati, ali ostavljamo samo log
     
     # 5. Finalna lista
     result = []
     for r in restaurants.values():
         r.pop("_feed_akcije", None)
         result.append(r)
-    print(f"[WOLT] Finished: {len(result)} restaurants for '{address}'")
+    
+    log_msg(f"[WOLT] Finished: {len(result)} restaurants for '{address}'", log_ph)
     return result
 
 # ---------------- SPARTAN MODE: FAKE PIXEL (za Glovo) ----------------
@@ -915,7 +926,12 @@ async def scan_process(addresses, log_ph, live_ph, live_state, generate_pdf=Fals
             # WOLT (geokodiranje + fallback)
             log_msg("🚲 Calling WOLT API (geocoded location)...", log_ph)
             loop = asyncio.get_event_loop()
-            r_wolt = await loop.run_in_executor(None, scrape_wolt_sync, adr, None, None, None)
+            # Prosleđujemo log_ph i live_ph/live_state kako bi se statusi prikazivali
+            r_wolt = await loop.run_in_executor(
+                None, 
+                scrape_wolt_sync, 
+                adr, log_ph, live_ph, live_state
+            )
             if live_ph is not None and live_state is not None:
                 live_state["Wolt"] = len(r_wolt)
                 refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], adr)
