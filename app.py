@@ -342,7 +342,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 WOLT_FETCH_WORKERS = 2
 
-# Dinamičke koordinate — setuju se iz scrape_wolt_sync na osnovu unete adrese
+# Dinamicke koordinate - setuju se iz scrape_wolt_sync na osnovu unete adrese
 _current_lat = 44.8178
 _current_lon = 20.4569
 
@@ -593,10 +593,11 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
     lat = float(geo_data[0]["lat"])
     lon = float(geo_data[0]["lon"])
 
-    # Ažuriramo globalne koordinate da ih _refresh_wolt_session koristi
+    # Azuriraj globalne koordinate za _refresh_wolt_session
     global _current_lat, _current_lon
     _current_lat = lat
     _current_lon = lon
+
     # city_slug za URL — iz geocodiranih podataka
     addr_det  = geo_data[0].get("address", {})
     city_raw  = (addr_det.get("city") or addr_det.get("town") or
@@ -616,10 +617,31 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
         items_in_response = 0
 
         if data:
+            # DEBUG: Loguj strukturu prvog odgovora
+            if page_num == 0:
+                sections_raw = data.get("sections", [])
+                print(f"[WOLT DEBUG] Top-level keys: {list(data.keys())}")
+                print(f"[WOLT DEBUG] Sections count: {len(sections_raw)}")
+                for si, sec in enumerate(sections_raw[:3]):
+                    items_raw = sec.get("items", [])
+                    print(f"[WOLT DEBUG] Section[{si}] name={sec.get('name','?')} items={len(items_raw)}")
+                    if items_raw:
+                        first = items_raw[0]
+                        print(f"[WOLT DEBUG]   First item keys: {list(first.keys())}")
+                        for alt_key in ["venue", "object", "venue_raw", "data"]:
+                            if alt_key in first and isinstance(first[alt_key], dict):
+                                print(f"[WOLT DEBUG]   '{alt_key}' keys: {list(first[alt_key].keys())[:15]}")
+
             for section in data.get("sections", []):
                 for item in section.get("items", []):
                     venue = item.get("venue")
                     if not venue:
+                        obj = item.get("object")
+                        if isinstance(obj, dict):
+                            venue = obj.get("venue") or (obj if obj.get("slug") else None)
+                    if not venue:
+                        if page_num == 0:
+                            print(f"[WOLT DEBUG] Item bez venue! Keys: {list(item.keys())}")
                         continue
                     name = venue.get("name", "")
                     slug = venue.get("slug", "")
