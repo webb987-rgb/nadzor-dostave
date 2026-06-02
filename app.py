@@ -334,10 +334,17 @@ def extract_promo(text, html_content, plat):
 
 def normalize_name(name): return re.sub(r'[^\w]', '', str(name).lower())
 
-# ================= NOVA WOLT LOGIKA (preuzeta iz promo.py) =================
+
+# ================= WOLT LOGIKA =================
 import requests
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+WOLT_FETCH_WORKERS = 2
+
+# Dinamičke koordinate — setuju se iz scrape_wolt_sync na osnovu unete adrese
+_current_lat = 44.8178
+_current_lon = 20.4569
 
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -349,17 +356,16 @@ BROWSER_HEADERS = {
     "W-Wolt-Session-Id": "wolt-monitor-session",
 }
 
-WOLT_FETCH_WORKERS = 6   # simultanih promo HTTP zahteva
-
 wolt_session = requests.Session()
 wolt_session.headers.update(BROWSER_HEADERS)
 
-_session_lock = threading.Lock()
-_last_refresh_time = 0.0
-_throttle_until = 0.0
-_throttle_lock  = threading.Lock()
-_fetch_log_lock = threading.Lock()
 _global_http_sem = threading.Semaphore(WOLT_FETCH_WORKERS)
+_session_lock    = threading.Lock()
+_last_refresh_time = 0.0
+_throttle_until  = 0.0
+_throttle_lock   = threading.Lock()
+_fetch_log_lock  = threading.Lock()
+
 
 def _refresh_wolt_session() -> bool:
     global _last_refresh_time
@@ -368,8 +374,10 @@ def _refresh_wolt_session() -> bool:
         if now - _last_refresh_time < 60:
             return True
         try:
-            init_url = "https://restaurant-api.wolt.com/v1/pages/restaurants?lat=44.8178&lon=20.4569&skip=0"
-            r = requests.get(init_url, headers=BROWSER_HEADERS, timeout=15)
+            r = requests.get(
+                f"https://restaurant-api.wolt.com/v1/pages/restaurants?lat={_current_lat}&lon={_current_lon}&skip=0",
+                headers=BROWSER_HEADERS, timeout=15
+            )
             if r.status_code == 200:
                 wolt_session.cookies.update(r.cookies)
                 _last_refresh_time = now
@@ -377,6 +385,7 @@ def _refresh_wolt_session() -> bool:
         except Exception:
             pass
         return False
+
 
 def wolt_get(url: str) -> tuple:
     try:
@@ -395,20 +404,25 @@ def wolt_get(url: str) -> tuple:
     except Exception:
         return None, -1
 
+
 def make_thread_session() -> requests.Session:
     s = requests.Session()
     for k, v in wolt_session.headers.items():
         s.headers[k] = v
+    for cookie in wolt_session.cookies:
+        s.cookies.set(cookie.name, cookie.value)
     return s
+
 
 def _log_fetch(msg: str):
     try:
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         with _fetch_log_lock:
-            with open("_wolt_fetch_debug.log", "a", encoding="utf-8") as f:
+            with open("_fetch_debug.log", "a", encoding="utf-8") as f:
                 f.write(f"[{ts}] {msg}\n")
     except Exception:
         pass
+
 
 def _wait_throttle():
     now = time.time()
@@ -417,13 +431,17 @@ def _wait_throttle():
     if wait > 0:
         time.sleep(wait)
 
+
 def _set_throttle(seconds: float):
     with _throttle_lock:
         global _throttle_until
         _throttle_until = max(_throttle_until, time.time() + seconds)
 
-def _fetch_url(ts, url: str, label: str) -> tuple:
+
+def _fetch_url(ts, url: str, label: str, stop_event) -> tuple:
     for attempt in range(4):
+        if stop_event.is_set():
+            return None, 0
         _wait_throttle()
         try:
             time.sleep(random.uniform(0.3, 1.2))
@@ -432,27 +450,24 @@ def _fetch_url(ts, url: str, label: str) -> tuple:
             if r.status_code == 200:
                 return r.json(), 200
             if r.status_code in (401, 403):
-                _log_fetch(f"{label} → {r.status_code} (auth fail) — refreshing session")
+                _log_fetch(f"{label} -> {r.status_code} auth fail")
                 _refresh_wolt_session()
                 return None, r.status_code
             if r.status_code == 429:
                 wait = 2 + 2 ** attempt
                 _set_throttle(wait)
-                _log_fetch(f"{label} → 429 retry {attempt} (throttle {wait:.0f}s)")
+                _log_fetch(f"{label} -> 429 retry {attempt}")
                 continue
-            _log_fetch(f"{label} → {r.status_code}")
+            _log_fetch(f"{label} -> {r.status_code}")
             return None, r.status_code
         except Exception as e:
-            _log_fetch(f"{label} → EXC {e}")
+            _log_fetch(f"{label} -> EXC {e}")
             if attempt < 3:
                 time.sleep(0.5)
     return None, -1
 
+
 def _parse_dynamic_with_item_discount(data: dict) -> list:
-    """
-    Precizno parsiranje Wolt dynamic API odgovora — isti algoritam kao u promo.py.
-    Čita venue_raw.discounts, venue.banners i venue.offer_assistant.
-    """
     akcije = []
     seen = set()
     ignore_texts = {
@@ -484,40 +499,32 @@ def _parse_dynamic_with_item_discount(data: dict) -> list:
         primary_text = banner.get("formatted_text") or desc.get("title") or ""
         add(primary_text, wolt_plus=is_wp)
         effects = disc.get("effects") or {}
-        item_discount_dict = effects.get("item_discount")
-        if item_discount_dict and isinstance(item_discount_dict, dict):
-            fraction = item_discount_dict.get("fraction")
+        item_d = effects.get("item_discount")
+        if item_d and isinstance(item_d, dict):
+            fraction = item_d.get("fraction")
             if fraction and float(fraction) > 0:
                 pct = int(round(float(fraction) * 100))
-                fallback = primary_text or f"{pct}% popust na izabrane artikle"
-                add(fallback, wolt_plus=is_wp)
-        basket_disc = effects.get("basket_discount")
-        if basket_disc and isinstance(basket_disc, dict):
-            amount   = basket_disc.get("amount")
-            fraction = basket_disc.get("fraction")
+                add(primary_text or f"{pct}% popust na izabrane artikle", wolt_plus=is_wp)
+        basket_d = effects.get("basket_discount")
+        if basket_d and isinstance(basket_d, dict):
+            amount   = basket_d.get("amount")
+            fraction = basket_d.get("fraction")
             if amount and int(amount) > 0:
-                rsd = int(amount) // 100
-                fallback = primary_text or f"{rsd} RSD popust na korpu"
-                add(fallback, wolt_plus=is_wp)
+                add(primary_text or f"{int(amount)//100} RSD popust na korpu", wolt_plus=is_wp)
             elif fraction and float(fraction) > 0:
                 pct = int(round(float(fraction) * 100))
-                fallback = primary_text or f"{pct}% popust na celu korpu"
-                add(fallback, wolt_plus=is_wp)
-        delivery_disc = effects.get("delivery_discount")
-        if delivery_disc and isinstance(delivery_disc, dict):
-            amount   = delivery_disc.get("amount")
-            fraction = delivery_disc.get("fraction")
+                add(primary_text or f"{pct}% popust na celu korpu", wolt_plus=is_wp)
+        delivery_d = effects.get("delivery_discount")
+        if delivery_d and isinstance(delivery_d, dict):
+            amount   = delivery_d.get("amount")
+            fraction = delivery_d.get("fraction")
             if (amount is not None and int(amount) == 0) or (fraction and float(fraction) >= 1.0):
-                fallback = primary_text or "Besplatna dostava"
-                add(fallback, wolt_plus=is_wp)
+                add(primary_text or "Besplatna dostava", wolt_plus=is_wp)
             elif amount and int(amount) > 0:
-                rsd = int(amount) // 100
-                fallback = primary_text or f"{rsd} RSD popust na dostavu"
-                add(fallback, wolt_plus=is_wp)
+                add(primary_text or f"{int(amount)//100} RSD popust na dostavu", wolt_plus=is_wp)
         free_items = effects.get("free_items")
         if free_items and isinstance(free_items, (dict, list)):
-            fallback = primary_text or "Gratis artikal uz porudžbinu"
-            add(fallback, wolt_plus=is_wp)
+            add(primary_text or "Gratis artikal uz porudžbinu", wolt_plus=is_wp)
 
     venue = data.get("venue") or {}
     for ban in venue.get("banners", []):
@@ -536,11 +543,11 @@ def _parse_dynamic_with_item_discount(data: dict) -> list:
 
     return akcije
 
-def _fetch_one_wolt(slug: str, lat: float, lon: float, feed_akcije: list) -> tuple:
-    """
-    Preuzima dynamic API podatke za jedan restoran i parsira promocije.
-    Vraća (slug, promo_str).
-    """
+
+def _fetch_one(slug: str, lat: float, lon: float, feed_akcije: list,
+               stop_event: threading.Event) -> tuple:
+    if stop_event.is_set():
+        return slug, "-"
     ts = make_thread_session()
     time.sleep(random.uniform(1.0, 2.0))
     dyn_url = (
@@ -548,69 +555,64 @@ def _fetch_one_wolt(slug: str, lat: float, lon: float, feed_akcije: list) -> tup
         f"?lat={lat}&lon={lon}&selected_delivery_method=homedelivery"
     )
     akcije_str = "-"
-    dyn_data, _ = _fetch_url(ts, dyn_url, f"DYN {slug}")
+    dyn_data, _ = _fetch_url(ts, dyn_url, f"DYN {slug}", stop_event)
     if dyn_data:
         try:
             parsed   = _parse_dynamic_with_item_discount(dyn_data)
             combined = list(dict.fromkeys(feed_akcije + parsed))
             akcije_str = "\n".join(combined) if combined else "-"
         except Exception as e:
-            _log_fetch(f"DYN {slug} → parse EXC {e}")
+            _log_fetch(f"DYN {slug} parse EXC {e}")
     elif feed_akcije:
         akcije_str = "\n".join(feed_akcije)
     return slug, akcije_str
 
-# ================= NOVI WOLT SCRAPER (requests-based, bez Playwright) =================
+
 def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -> list:
-    """
-    Čisti requests-based Wolt scraper.
-    1. Geocodira adresu → lat/lon
-    2. Paginovano preuzima sve restorane iz feed API-ja
-    3. Konkurentno preuzima dynamic API za svaki restoran (promocije)
-    Vraća listu dict-ova kompatibilnih sa ostatkom skripte.
-    """
-    import urllib.request as _urllib_req
+    import urllib.request as _req
     import json as _json
 
-    log_msg(f"[WOLT] Geocoding address: {address}...", log_ph)
-
-    custom_agent = 'DeliveryMonitorApp/7.0 (wolt_scraper)'
+    print(f"[WOLT] Geocoding: {address}")
     geo_data = []
-    try:
-        geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(address + ', Serbia')}&format=json&limit=1&addressdetails=1"
-        req = _urllib_req.Request(geo_url, headers={'User-Agent': custom_agent})
-        with _urllib_req.urlopen(req) as response:
-            geo_data = _json.loads(response.read().decode())
-        if not geo_data:
+    for query in [f"{address}, Serbia", address]:
+        try:
+            url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(query)}&format=json&limit=1&addressdetails=1"
+            req = _req.Request(url, headers={"User-Agent": "DeliveryMonitor/1.0"})
+            with _req.urlopen(req, timeout=10) as resp:
+                geo_data = _json.loads(resp.read().decode())
+            if geo_data:
+                break
             time.sleep(1)
-            geo_url2 = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(address)}&format=json&limit=1&addressdetails=1"
-            req2 = _urllib_req.Request(geo_url2, headers={'User-Agent': custom_agent})
-            with _urllib_req.urlopen(req2) as response2:
-                geo_data = _json.loads(response2.read().decode())
-    except Exception as e:
-        log_msg(f"[WOLT ERROR] Geocoding failed: {e}", log_ph)
-        return []
+        except Exception as e:
+            print(f"[WOLT] Geocoding error: {e}")
 
     if not geo_data:
-        log_msg(f"[WOLT ERROR] Cannot find coordinates for: {address}", log_ph)
+        print(f"[WOLT ERROR] Ne mogu da geocodiram: {address}")
         return []
 
     lat = float(geo_data[0]["lat"])
     lon = float(geo_data[0]["lon"])
-    city_raw = geo_data[0].get("address", {}).get("city",
-               geo_data[0].get("address", {}).get("town", "belgrade"))
-    city_slug = normalize_name(cyrillic_to_latin(city_raw))
-    log_msg(f"[WOLT] Coordinates: {lat}, {lon} (city: {city_slug}). Loading restaurants...", log_ph)
 
-    # ── Korak 1: Feed paginacija ──────────────────────────────────────────────
+    # Ažuriramo globalne koordinate da ih _refresh_wolt_session koristi
+    global _current_lat, _current_lon
+    _current_lat = lat
+    _current_lon = lon
+    # city_slug za URL — iz geocodiranih podataka
+    addr_det  = geo_data[0].get("address", {})
+    city_raw  = (addr_det.get("city") or addr_det.get("town") or
+                 addr_det.get("village") or addr_det.get("municipality") or "")
+    city_slug = cyrillic_to_latin(city_raw).lower().replace(" ", "-") or "belgrade"
+    print(f"[WOLT] Koordinate: {lat:.4f},{lon:.4f} | Grad: {city_raw} | Slug: {city_slug}")
+
+    stop_event = threading.Event()
+
+    # ── FAZA 1: Feed paginacija ───────────────────────────────────────────────
     restaurants = {}
     skip = 0
-    page_size = 40
-    max_pages = 30
-
-    for page_num in range(max_pages):
+    for page_num in range(50):
+        count_before = len(restaurants)
         endpoint = f"https://restaurant-api.wolt.com/v1/pages/restaurants?lat={lat}&lon={lon}&skip={skip}"
-        data, status = wolt_get(endpoint)
+        data, _status = wolt_get(endpoint)
         items_in_response = 0
 
         if data:
@@ -625,25 +627,20 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
                         continue
                     items_in_response += 1
 
-                    status_val = "Open" if venue.get("online") else "Closed"
-                    rating_obj = venue.get("rating") or {}
-                    r_score    = rating_obj.get("score", "-") if isinstance(rating_obj, dict) else "-"
-                    est        = venue.get("estimate_range") or venue.get("estimate")
-                    time_str   = f"{est} min" if est else "-"
+                    status_obj = "Open" if venue.get("online") else "Closed"
+                    rating   = venue.get("rating") or {}
+                    r_score  = rating.get("score", "-") if isinstance(rating, dict) else "-"
+                    est      = venue.get("estimate_range") or venue.get("estimate")
+                    delivery = f"{est} min" if est else "-"
 
-                    # Numerička vrednost vremena
                     time_num = np.nan
                     if est:
                         try:
-                            parts = str(est).split('-')
-                            if len(parts) == 2:
-                                time_num = (int(parts[0]) + int(parts[1])) / 2.0
-                            else:
-                                time_num = float(parts[0])
+                            parts = str(est).split("-")
+                            time_num = (int(parts[0]) + int(parts[1])) / 2.0 if len(parts) == 2 else float(parts[0])
                         except Exception:
                             pass
 
-                    # Feed-nivo akcije i novo badge
                     feed_akcije = []
                     novo_status = False
                     for badge in venue.get("badges", []):
@@ -660,58 +657,44 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
                         else:
                             feed_akcije.append(f"• {label}")
 
-                    link_target = item.get("link", {}).get("target", "")
-                    if link_target.startswith("http"):
-                        link = link_target
-                    elif link_target.startswith("/"):
-                        link = f"https://wolt.com{link_target}"
-                    else:
-                        link = f"https://wolt.com/en/srb/{city_slug}/restaurant/{slug}"
-
                     restaurants[slug] = {
-                        "Address":        address,
-                        "Platform":       "Wolt",
-                        "Name":           remove_accents(name),
-                        "Rating":         str(r_score),
-                        "Delivery Time":  time_str,
-                        "Promo":          "\n".join(feed_akcije) if feed_akcije else "-",
-                        "Status":         status_val,
-                        "Time_Num":       time_num,
-                        "Is_New":         novo_status,
-                        "Link":           link,
-                        "_slug":          slug,
-                        "_feed_akcije":   feed_akcije,
+                        "Address":       address,
+                        "Platform":      "Wolt",
+                        "Name":          remove_accents(name),
+                        "Rating":        str(r_score),
+                        "Delivery Time": delivery,
+                        "Promo":         "\n".join(feed_akcije) if feed_akcije else "-",
+                        "Status":        status_obj,
+                        "Time_Num":      time_num,
+                        "Is_New":        novo_status,
+                        "Link":          f"https://wolt.com/en/srb/{city_slug}/restaurant/{slug}",
+                        "_feed_akcije":  feed_akcije,
                     }
 
-        log_msg(f"[WOLT] Page {page_num+1}: +{items_in_response} restaurants (total {len(restaurants)})", log_ph)
-        if live_ph and live_state is not None:
-            live_state["Wolt"] = len(restaurants)
-            refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address)
+        new_this_page = len(restaurants) - count_before
+        print(f"[WOLT] str.{page_num+1} | +{new_this_page} | ukupno {len(restaurants)}")
 
         if items_in_response == 0:
             break
-        skip += page_size
-        time.sleep(random.uniform(0.5, 1.5))
+        skip += 40
+        time.sleep(random.uniform(0.5, 1.8))
 
     if not restaurants:
-        log_msg(f"[WOLT ERROR] No restaurants found for {address}", log_ph)
+        print(f"[WOLT ERROR] Nema restorana za: {address}")
         return []
 
-    log_msg(f"[WOLT] Fetched {len(restaurants)} restaurants. Loading promotions...", log_ph)
-    if live_ph and live_state is not None:
-        refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address,
-                        custom_text=f"📍 {len(restaurants)} Wolt restaurants loaded. Scanning promotions...")
+    print(f"[WOLT] Feed gotov: {len(restaurants)} restorana. Učitavam promocije...")
 
-    # ── Korak 2: Konkurentno preuzimanje dynamic API (promocije) ─────────────
-    slugs = list(restaurants.keys())
-    total = len(slugs)
+    # ── FAZA 2: Konkurentni fetch promocija ───────────────────────────────────
+    slugs     = list(restaurants.keys())
+    total     = len(slugs)
     completed = 0
 
     with ThreadPoolExecutor(max_workers=WOLT_FETCH_WORKERS) as executor:
         futures = {
             executor.submit(
-                _fetch_one_wolt, slug, lat, lon,
-                restaurants[slug]["_feed_akcije"]
+                _fetch_one, slug, lat, lon,
+                restaurants[slug]["_feed_akcije"], stop_event
             ): slug for slug in slugs
         }
         for future in as_completed(futures):
@@ -721,22 +704,17 @@ def scrape_wolt_sync(address: str, log_ph=None, live_ph=None, live_state=None) -
             except Exception:
                 pass
             completed += 1
-            if completed % 20 == 0 or completed == total:
-                log_msg(f"[WOLT] Promotions: {completed}/{total}", log_ph)
+            if completed % 10 == 0 or completed == total:
+                print(f"[WOLT] Promocije: {completed}/{total}")
 
-    # ── Čišćenje internih ključeva ─────────────────────────────────────────────
     result = []
     for r in restaurants.values():
-        r.pop("_slug", None)
         r.pop("_feed_akcije", None)
         result.append(r)
 
-    log_msg(f"[WOLT] Done. {len(result)} restaurants scanned.", log_ph)
-    if live_ph and live_state is not None:
-        live_state["Wolt"] = len(result)
-        refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], address)
-
+    print(f"[WOLT] Gotovo. {len(result)} restorana za '{address}'.")
     return result
+
 
 # ---------------- SPARTAN MODE: FAKE PIXEL (za Glovo) ----------------
 TINY_PNG = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
@@ -934,22 +912,21 @@ async def scan_process(addresses, log_ph, live_ph, live_state, generate_pdf=Fals
             all_data.extend(r_glovo)
             await context_glovo.close()
 
-            # ── WOLT (novi čisti requests scraper, bez Playwright) ──────────
-            # VAŽNO: log_ph i live_ph se NE prosleđuju u thread jer Streamlit
+            # ── WOLT (novi čisti requests scraper sa multi-koordinatama) ─────
+            # VAŽNO: log_ph i live_ph se NE prosleđuju jer Streamlit
             # ne dozvoljava UI pozive van glavnog thread-a (NoSessionContext).
-            # Samo print() logovanje radi bezbedno iz threada.
-            log_msg("🚲 Calling WOLT API (requests)...", log_ph)
+            log_msg("🚲 Calling WOLT API (requests + multi-coords)...", log_ph)
             loop = asyncio.get_event_loop()
             r_wolt = await loop.run_in_executor(
                 None,
                 scrape_wolt_sync,
-                adr, None, None, None   # log_ph=None, live_ph=None, live_state=None
+                adr, None, None, None
             )
             # Ažuriramo live UI tek kad se thread završi (bezbedno, u async kontekstu)
             if live_ph is not None and live_state is not None:
                 live_state["Wolt"] = len(r_wolt)
                 refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], adr)
-            log_msg(f"[WOLT] {len(r_wolt)} restaurants loaded for {adr}.", log_ph)
+            log_msg(f"[WOLT] ✅ {len(r_wolt)} restaurants loaded for {adr}.", log_ph)
             all_data.extend(r_wolt)
 
         await browser.close()
@@ -992,8 +969,7 @@ if 'df_history' not in st.session_state:
 st.title("🍔 Delivery Monitor (Wolt & Glovo)")
 with st.sidebar:
     st.header("⚙️ Settings")
-    address_1 = st.text_input("📍 Address 1 (Required):", value="", placeholder="Makenzijeva 57, Belgrade")
-    address_2 = st.text_input("📍 Address 2 (Optional):", value="", placeholder="Somborska 5, Niš")
+    address_1 = st.text_input("📍 Address:", value="", placeholder="Makenzijeva 57, Beograd")
     auto_refresh = st.checkbox("🔄 Auto-refresh", value=False)
     sleep_interval = st.number_input("⏱️ Interval (min):", min_value=1, value=60, disabled=not auto_refresh)
     generate_pdf = st.checkbox("📄 Generate PDF reports", value=False)
@@ -1064,7 +1040,7 @@ with st.sidebar:
 if st.session_state.is_running or st.session_state.loaded_history:
 
     if st.session_state.is_running:
-        list_addresses = [cyrillic_to_latin(a.strip()) for a in [address_1, address_2] if a.strip()]
+        list_addresses = [cyrillic_to_latin(a.strip()) for a in [address_1] if a.strip()]
         if not list_addresses: 
             st.warning("⚠️ Enter at least the first address to scan!"); st.session_state.is_running = False; st.rerun()
 
