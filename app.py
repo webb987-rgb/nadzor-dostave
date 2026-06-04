@@ -595,54 +595,68 @@ def scrape_wolt_sync(address: str) -> list:
         return []
 
     for section in data.get("sections", []):
-        for item in section.get("items", []):
-            venue = item.get("venue") if isinstance(item, dict) else None
-            if not venue:
-                continue
-            name = venue.get("name", "")
-            slug = venue.get("slug", "")
-            if not name or not slug or slug in restaurants:
-                continue
-            status_obj = "Open" if venue.get("online") else "Closed"
-            rating = venue.get("rating") or {}
-            r_score = rating.get("score", "-") if isinstance(rating, dict) else "-"
-            est = venue.get("estimate_range") or venue.get("estimate")
-            delivery = f"{est} min" if est else "-"
-            time_num = np.nan
-            if est:
-                try:
-                    parts = str(est).split("-")
-                    time_num = (int(parts[0]) + int(parts[1])) / 2.0 if len(parts) == 2 else float(parts[0])
-                except Exception:
-                    pass
-            feed_akcije = []
-            novo_status = False
-            for badge in venue.get("badges", []):
-                txt = badge.get("text", "") if isinstance(badge, dict) else ""
-                if txt:
-                    if txt.lower() in ["novo", "new"]:
-                        novo_status = True
-                    else:
-                        feed_akcije.append(f"• {txt}")
-            label = venue.get("label", "")
-            if label:
-                if label.lower() in ["novo", "new"]:
+        # Struktura: sekcija["venue"]["venue"] sadrzi restoran
+        if "venue-and-items" not in section.get("name", ""):
+            continue
+        outer = section.get("venue", {})
+        if not isinstance(outer, dict):
+            continue
+        venue = outer.get("venue", {})
+        if not isinstance(venue, dict) or not venue:
+            continue
+
+        name = venue.get("name", "")
+        slug = venue.get("slug", "")
+        if not name or not slug or slug in restaurants:
+            continue
+
+        status_obj = "Open" if venue.get("online") else "Closed"
+        rating = venue.get("rating") or {}
+        r_score = rating.get("score", "-") if isinstance(rating, dict) else "-"
+        est = venue.get("estimate_range") or venue.get("estimate")
+        delivery = f"{est} min" if est else "-"
+        time_num = np.nan
+        if est:
+            try:
+                parts = str(est).split("-")
+                time_num = (int(parts[0]) + int(parts[1])) / 2.0 if len(parts) == 2 else float(parts[0])
+            except Exception:
+                pass
+
+        feed_akcije = []
+        novo_status = False
+        for badge in venue.get("badges", []):
+            txt = badge.get("text", "") if isinstance(badge, dict) else ""
+            if txt:
+                if txt.lower() in ["novo", "new"]:
                     novo_status = True
                 else:
-                    feed_akcije.append(f"• {label}")
-            restaurants[slug] = {
-                "Address": address,
-                "Platform": "Wolt",
-                "Name": remove_accents(name),
-                "Rating": str(r_score),
-                "Delivery Time": delivery,
-                "Promo": "\n".join(feed_akcije) if feed_akcije else "-",
-                "Status": status_obj,
-                "Time_Num": time_num,
-                "Is_New": novo_status,
-                "Link": f"https://wolt.com/en/srb/{city_slug}/restaurant/{slug}",
-                "_feed_akcije": feed_akcije,
-            }
+                    feed_akcije.append(f"• {txt}")
+        # badges mogu biti i u outer["telemetry_venue_badges"]
+        for badge_txt in outer.get("telemetry_venue_badges", []):
+            if isinstance(badge_txt, str) and badge_txt.lower() not in ["novo", "new"]:
+                feed_akcije.append(f"• {badge_txt}")
+
+        label = venue.get("label", "")
+        if label:
+            if label.lower() in ["novo", "new"]:
+                novo_status = True
+            else:
+                feed_akcije.append(f"• {label}")
+
+        restaurants[slug] = {
+            "Address": address,
+            "Platform": "Wolt",
+            "Name": remove_accents(name),
+            "Rating": str(r_score),
+            "Delivery Time": delivery,
+            "Promo": "\n".join(feed_akcije) if feed_akcije else "-",
+            "Status": status_obj,
+            "Time_Num": time_num,
+            "Is_New": novo_status,
+            "Link": f"https://wolt.com/en/srb/{city_slug}/restaurant/{slug}",
+            "_feed_akcije": feed_akcije,
+        }
 
     print(f"[WOLT] Ucitano {len(restaurants)} restorana.")
     
