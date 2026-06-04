@@ -334,107 +334,82 @@ def extract_promo(text, html_content, plat):
 
 def normalize_name(name): return re.sub(r'[^\w]', '', str(name).lower())
 
-# ================= WOLT – RADNA LOGIKA (geokodiranje + fallback + statusi) =================
-WOLT_FETCH_WORKERS = 2
-_global_http_sem = threading.Semaphore(WOLT_FETCH_WORKERS * 2)
+# ================= WOLT – RADNA LOGIKA (curl_cffi + impersonate chrome) =================
+# Koristi curl_cffi sa impersonate="chrome120" i POST metodu - jedini nacin da se zaobidze
+# Wolt-ova TLS/browser fingerprint zastita sa servera
 
-BROWSER_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "sr;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Origin": "https://wolt.com",
-    "Referer": "https://wolt.com/en/srb/",
-    "W-PlatformType": "Web",
-    "W-Wolt-Session-Id": "wolt-monitor-session",
+try:
+    from curl_cffi import requests as curl_requests
+    CURL_CFFI_AVAILABLE = True
+except ImportError:
+    CURL_CFFI_AVAILABLE = False
+    print("[WOLT] UPOZORENJE: curl_cffi nije instaliran! Wolt nece raditi.")
+
+WOLT_HEADERS = {
+    "accept": "application/json, text/plain, */*",
+    "accept-language": "en-US,en;q=0.9,sr-RS;q=0.8,sr;q=0.7",
+    "app-language": "en",
+    "client-version": "1.16.109",
+    "clientversionnumber": "1.16.109",
+    "content-type": "application/json",
+    "origin": "https://wolt.com",
+    "platform": "Web",
+    "referer": "https://wolt.com/",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-site",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+    "w-wolt-session-id": "322cf981-a30b-460e-a2ad-9e2f2367718f",
+    "x-wolt-web-clientid": "6020ea5f-e8b8-428c-9dac-990e6762f56f",
+    "cookie": "ravelinDeviceId=rjs-e2022c3e-07d3-4c6a-910d-973b4273ee0d; rskxRunCookie=0; rCookie=df93ypr9eeqeubs3uxtx1emfgklyxr; cwc-consents={%22analytics%22:true%2C%22functional%22:true%2C%22interaction%22:{%22bundle%22:%22allow%22}%2C%22marketing%22:true%2C%22updatedAt%22:{%22bundle%22:%222025-09-12T08:23:42.245Z%22}%2C%22versions%22:{%22bundle%22:[%226f6e0a18-e3dd-43e8-9e57-7e09f6d90239%22%2C%224900fd93-1d29-4f54-b165-82d98b47c9ce%22]}}; _ga=GA1.1.827517620.1757665421; __woltUid=6020ea5f-e8b8-428c-9dac-990e6762f56f; telemetryDeviceId=6020ea5f-e8b8-428c-9dac-990e6762f56f; cwc-language=en; __woltUid_=6020ea5f-e8b8-428c-9dac-990e6762f56f; lantern=939b559d-7f23-4458-a2b1-d2601b19309f; telemetrySessionId=322cf981-a30b-460e-a2ad-9e2f2367718f; telemetrySessionId_=322cf981-a30b-460e-a2ad-9e2f2367718f",
 }
 
-wolt_session = requests.Session()
-wolt_session.headers.update(BROWSER_HEADERS)
+WOLT_FETCH_WORKERS = 3  # paralelni pozivi za promocije
 
-_session_lock = threading.Lock()
-_last_refresh_time = 0.0
-_throttle_until = 0.0
-_throttle_lock = threading.Lock()
-
-def _refresh_wolt_session() -> bool:
-    global _last_refresh_time
-    with _session_lock:
-        now = time.time()
-        if now - _last_refresh_time < 60:
-            return True
-        try:
-            r = requests.get(
-                "https://restaurant-api.wolt.com/v1/pages/restaurants?lat=44.8178&lon=20.4569&skip=0",
-                headers=BROWSER_HEADERS, timeout=15
-            )
-            if r.status_code == 200:
-                wolt_session.cookies.update(r.cookies)
-                _last_refresh_time = now
-                return True
-        except Exception:
-            pass
-        return False
-
-def wolt_get(url: str) -> tuple:
+def wolt_post(lat: float, lon: float) -> tuple:
+    """POST na consumer-api sa curl_cffi impersonate - zaobilazi TLS fingerprint zastitu."""
+    if not CURL_CFFI_AVAILABLE:
+        return None, -1
+    url = "https://consumer-api.wolt.com/v1/pages/category/restaurants"
+    payload = {"lat": float(lat), "lon": float(lon)}
     try:
-        with _global_http_sem:
-            r = wolt_session.get(url, timeout=15)
+        r = curl_requests.post(
+            url,
+            json=payload,
+            headers=WOLT_HEADERS,
+            impersonate="chrome120",
+            timeout=20
+        )
         if r.status_code == 200:
             return r.json(), 200
-        if r.status_code in (401, 403):
-            _refresh_wolt_session()
-            with _global_http_sem:
-                r2 = wolt_session.get(url, timeout=15)
-            if r2.status_code == 200:
-                return r2.json(), 200
-            return None, r2.status_code
+        print(f"[WOLT] API odgovor: {r.status_code} - {r.text[:200]}")
         return None, r.status_code
-    except Exception:
+    except Exception as e:
+        print(f"[WOLT] wolt_post greška: {e}")
         return None, -1
 
-def make_thread_session() -> requests.Session:
-    s = requests.Session()
-    for k, v in wolt_session.headers.items():
-        s.headers[k] = v
-    for cookie in wolt_session.cookies:
-        s.cookies.set(cookie.name, cookie.value)
-    return s
-
-def _wait_throttle():
-    now = time.time()
-    with _throttle_lock:
-        wait = _throttle_until - now
-    if wait > 0:
-        time.sleep(wait)
-
-def _set_throttle(seconds: float):
-    with _throttle_lock:
-        global _throttle_until
-        _throttle_until = max(_throttle_until, time.time() + seconds)
-
-def _fetch_url(ts, url: str, label: str, stop_event) -> tuple:
-    for attempt in range(4):
-        if stop_event and stop_event.is_set():
-            return None, 0
-        _wait_throttle()
-        try:
-            time.sleep(random.uniform(0.3, 1.2))
-            with _global_http_sem:
-                r = ts.get(url, timeout=10)
-            if r.status_code == 200:
-                return r.json(), 200
-            if r.status_code in (401, 403):
-                _refresh_wolt_session()
-                return None, r.status_code
-            if r.status_code == 429:
-                wait = 2 + 2 ** attempt
-                _set_throttle(wait)
-                continue
-            return None, r.status_code
-        except Exception:
-            if attempt < 3:
-                time.sleep(0.5)
-    return None, -1
+def wolt_fetch_dynamic(slug: str, lat: float, lon: float) -> tuple:
+    """Dohvata promocije za jedan restoran - takodje koristi curl_cffi."""
+    if not CURL_CFFI_AVAILABLE:
+        return None, -1
+    url = (
+        f"https://consumer-api.wolt.com/order-xp/web/v1/venue/slug/{slug}/dynamic/"
+        f"?lat={lat}&lon={lon}&selected_delivery_method=homedelivery"
+    )
+    try:
+        time.sleep(random.uniform(0.5, 1.5))
+        r = curl_requests.get(
+            url,
+            headers=WOLT_HEADERS,
+            impersonate="chrome120",
+            timeout=15
+        )
+        if r.status_code == 200:
+            return r.json(), 200
+        return None, r.status_code
+    except Exception as e:
+        print(f"[WOLT] Dynamic greška za {slug}: {e}")
+        return None, -1
 
 def _parse_dynamic_with_item_discount(data: dict) -> list:
     akcije = []
@@ -515,14 +490,8 @@ def _parse_dynamic_with_item_discount(data: dict) -> list:
 def _fetch_one(slug: str, lat: float, lon: float, feed_akcije: list, stop_event=None) -> tuple[str, str]:
     if stop_event and stop_event.is_set():
         return slug, "-"
-    ts = make_thread_session()
-    time.sleep(random.uniform(1.0, 2.0))
-    dyn_url = (
-        f"https://consumer-api.wolt.com/order-xp/web/v1/venue/slug/{slug}/dynamic/"
-        f"?lat={lat}&lon={lon}&selected_delivery_method=homedelivery"
-    )
     akcije_str = "-"
-    dyn_data, _ = _fetch_url(ts, dyn_url, f"DYN {slug}", stop_event)
+    dyn_data, _ = wolt_fetch_dynamic(slug, lat, lon)
     if dyn_data:
         try:
             parsed   = _parse_dynamic_with_item_discount(dyn_data)
@@ -618,78 +587,64 @@ def scrape_wolt_sync(address: str) -> list:
         city_slug = detected_city.replace(" ", "-")
         print(f"[WOLT] Fallback na grad {city_name} -> lat={lat:.4f}, lon={lon:.4f}")
     
-    # 3. Dohvatanje restorana (paginacija)
+    # 3. Dohvatanje restorana (jedan POST poziv vraca sve)
     restaurants = {}
-    skip = 0
-    page = 0
-    while True:
-        endpoint = f"https://restaurant-api.wolt.com/v1/pages/restaurants?lat={lat}&lon={lon}&skip={skip}"
-        data, status = wolt_get(endpoint)
-        if status != 200:
-            print(f"[WOLT] API error {status} for {endpoint}")
-            break
-        items_in_response = 0
-        if data:
-            for section in data.get("sections", []):
-                for item in section.get("items", []):
-                    venue = item.get("venue")
-                    if not venue:
-                        continue
-                    name = venue.get("name", "")
-                    slug = venue.get("slug", "")
-                    if not name or not slug or slug in restaurants:
-                        continue
-                    items_in_response += 1
-                    status_obj = "Open" if venue.get("online") else "Closed"
-                    rating = venue.get("rating") or {}
-                    r_score = rating.get("score", "-") if isinstance(rating, dict) else "-"
-                    est = venue.get("estimate_range") or venue.get("estimate")
-                    delivery = f"{est} min" if est else "-"
-                    time_num = np.nan
-                    if est:
-                        try:
-                            parts = str(est).split("-")
-                            time_num = (int(parts[0]) + int(parts[1])) / 2.0 if len(parts) == 2 else float(parts[0])
-                        except Exception:
-                            pass
-                    feed_akcije = []
-                    novo_status = False
-                    for badge in venue.get("badges", []):
-                        txt = badge.get("text", "")
-                        if txt:
-                            if txt.lower() in ["novo", "new"]:
-                                novo_status = True
-                            else:
-                                feed_akcije.append(f"• {txt}")
-                    label = venue.get("label", "")
-                    if label:
-                        if label.lower() in ["novo", "new"]:
-                            novo_status = True
-                        else:
-                            feed_akcije.append(f"• {label}")
-                    restaurants[slug] = {
-                        "Address": address,
-                        "Platform": "Wolt",
-                        "Name": remove_accents(name),
-                        "Rating": str(r_score),
-                        "Delivery Time": delivery,
-                        "Promo": "\n".join(feed_akcije) if feed_akcije else "-",
-                        "Status": status_obj,
-                        "Time_Num": time_num,
-                        "Is_New": novo_status,
-                        "Link": f"https://wolt.com/en/srb/{city_slug}/restaurant/{slug}",
-                        "_feed_akcije": feed_akcije,
-                    }
-        print(f"[WOLT] Page {page+1}: got {items_in_response} new restaurants, total {len(restaurants)}")
-        
-        # Live UI se NE ažurira ovde (nismo u Streamlit threadu)
-        # Update se šalje nakon što executor završi (u scan_process)
-        
-        if items_in_response == 0:
-            break
-        skip += 40
-        page += 1
-        time.sleep(random.uniform(0.5, 1.8))
+    data, status = wolt_post(lat, lon)
+    if status != 200 or not data:
+        print(f"[WOLT] API greška {status} za lat={lat}, lon={lon}")
+        return []
+
+    for section in data.get("sections", []):
+        for item in section.get("items", []):
+            venue = item.get("venue") if isinstance(item, dict) else None
+            if not venue:
+                continue
+            name = venue.get("name", "")
+            slug = venue.get("slug", "")
+            if not name or not slug or slug in restaurants:
+                continue
+            status_obj = "Open" if venue.get("online") else "Closed"
+            rating = venue.get("rating") or {}
+            r_score = rating.get("score", "-") if isinstance(rating, dict) else "-"
+            est = venue.get("estimate_range") or venue.get("estimate")
+            delivery = f"{est} min" if est else "-"
+            time_num = np.nan
+            if est:
+                try:
+                    parts = str(est).split("-")
+                    time_num = (int(parts[0]) + int(parts[1])) / 2.0 if len(parts) == 2 else float(parts[0])
+                except Exception:
+                    pass
+            feed_akcije = []
+            novo_status = False
+            for badge in venue.get("badges", []):
+                txt = badge.get("text", "") if isinstance(badge, dict) else ""
+                if txt:
+                    if txt.lower() in ["novo", "new"]:
+                        novo_status = True
+                    else:
+                        feed_akcije.append(f"• {txt}")
+            label = venue.get("label", "")
+            if label:
+                if label.lower() in ["novo", "new"]:
+                    novo_status = True
+                else:
+                    feed_akcije.append(f"• {label}")
+            restaurants[slug] = {
+                "Address": address,
+                "Platform": "Wolt",
+                "Name": remove_accents(name),
+                "Rating": str(r_score),
+                "Delivery Time": delivery,
+                "Promo": "\n".join(feed_akcije) if feed_akcije else "-",
+                "Status": status_obj,
+                "Time_Num": time_num,
+                "Is_New": novo_status,
+                "Link": f"https://wolt.com/en/srb/{city_slug}/restaurant/{slug}",
+                "_feed_akcije": feed_akcije,
+            }
+
+    print(f"[WOLT] Ucitano {len(restaurants)} restorana.")
     
     if not restaurants:
         print(f"[WOLT] No restaurants found for coordinates {lat},{lon}")
