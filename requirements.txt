@@ -6,3 +6,4 @@ plotly
 playwright
 reportlab
 requests
+curl_cffi
