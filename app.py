@@ -366,27 +366,36 @@ WOLT_HEADERS = {
 
 WOLT_FETCH_WORKERS = 3  # paralelni pozivi za promocije
 
-def wolt_post(lat: float, lon: float) -> tuple:
-    """POST na consumer-api sa curl_cffi impersonate - zaobilazi TLS fingerprint zastitu."""
+def wolt_get_restaurants(lat: float, lon: float) -> tuple:
+    """GET na restaurant-api sa curl_cffi - vraca sve restorane u jednom pozivu."""
     if not CURL_CFFI_AVAILABLE:
         return None, -1
-    url = "https://consumer-api.wolt.com/v1/pages/category/restaurants"
-    payload = {"lat": float(lat), "lon": float(lon)}
-    try:
-        r = curl_requests.post(
-            url,
-            json=payload,
-            headers=WOLT_HEADERS,
-            impersonate="chrome120",
-            timeout=20
-        )
-        if r.status_code == 200:
-            return r.json(), 200
-        print(f"[WOLT] API odgovor: {r.status_code} - {r.text[:200]}")
-        return None, r.status_code
-    except Exception as e:
-        print(f"[WOLT] wolt_post greška: {e}")
-        return None, -1
+    url = f"https://restaurant-api.wolt.com/v1/pages/restaurants?lat={lat}&lon={lon}&skip=0"
+    for attempt in range(4):
+        try:
+            if attempt > 0:
+                wait = 5 * attempt
+                print(f"[WOLT] Retry {attempt}/3, cekam {wait}s...")
+                time.sleep(wait)
+            r = curl_requests.get(
+                url,
+                headers=WOLT_HEADERS,
+                impersonate="chrome120",
+                timeout=30
+            )
+            if r.status_code == 200:
+                return r.json(), 200
+            if r.status_code == 429:
+                print(f"[WOLT] 429 Rate limit, cekam 15s...")
+                time.sleep(15)
+                continue
+            print(f"[WOLT] API odgovor: {r.status_code} - {r.text[:200]}")
+            return None, r.status_code
+        except Exception as e:
+            print(f"[WOLT] wolt_get_restaurants greška: {e}")
+            if attempt < 3:
+                time.sleep(3)
+    return None, -1
 
 def wolt_fetch_dynamic(slug: str, lat: float, lon: float) -> tuple:
     """Dohvata promocije za jedan restoran - takodje koristi curl_cffi."""
@@ -587,76 +596,62 @@ def scrape_wolt_sync(address: str) -> list:
         city_slug = detected_city.replace(" ", "-")
         print(f"[WOLT] Fallback na grad {city_name} -> lat={lat:.4f}, lon={lon:.4f}")
     
-    # 3. Dohvatanje restorana (jedan POST poziv vraca sve)
+    # 3. Dohvatanje restorana (restaurant-api, curl_cffi GET, sve odjednom)
     restaurants = {}
-    data, status = wolt_post(lat, lon)
+    data, status = wolt_get_restaurants(lat, lon)
     if status != 200 or not data:
         print(f"[WOLT] API greška {status} za lat={lat}, lon={lon}")
         return []
 
     for section in data.get("sections", []):
-        # Struktura: sekcija["venue"]["venue"] sadrzi restoran
-        if "venue-and-items" not in section.get("name", ""):
-            continue
-        outer = section.get("venue", {})
-        if not isinstance(outer, dict):
-            continue
-        venue = outer.get("venue", {})
-        if not isinstance(venue, dict) or not venue:
-            continue
-
-        name = venue.get("name", "")
-        slug = venue.get("slug", "")
-        if not name or not slug or slug in restaurants:
-            continue
-
-        status_obj = "Open" if venue.get("online") else "Closed"
-        rating = venue.get("rating") or {}
-        r_score = rating.get("score", "-") if isinstance(rating, dict) else "-"
-        est = venue.get("estimate_range") or venue.get("estimate")
-        delivery = f"{est} min" if est else "-"
-        time_num = np.nan
-        if est:
-            try:
-                parts = str(est).split("-")
-                time_num = (int(parts[0]) + int(parts[1])) / 2.0 if len(parts) == 2 else float(parts[0])
-            except Exception:
-                pass
-
-        feed_akcije = []
-        novo_status = False
-        for badge in venue.get("badges", []):
-            txt = badge.get("text", "") if isinstance(badge, dict) else ""
-            if txt:
-                if txt.lower() in ["novo", "new"]:
+        for item in section.get("items", []):
+            venue = item.get("venue") if isinstance(item, dict) else None
+            if not venue:
+                continue
+            name = venue.get("name", "")
+            slug = venue.get("slug", "")
+            if not name or not slug or slug in restaurants:
+                continue
+            status_obj = "Open" if venue.get("online") else "Closed"
+            rating = venue.get("rating") or {}
+            r_score = rating.get("score", "-") if isinstance(rating, dict) else "-"
+            est = venue.get("estimate_range") or venue.get("estimate")
+            delivery = f"{est} min" if est else "-"
+            time_num = np.nan
+            if est:
+                try:
+                    parts = str(est).split("-")
+                    time_num = (int(parts[0]) + int(parts[1])) / 2.0 if len(parts) == 2 else float(parts[0])
+                except Exception:
+                    pass
+            feed_akcije = []
+            novo_status = False
+            for badge in venue.get("badges", []):
+                txt = badge.get("text", "") if isinstance(badge, dict) else ""
+                if txt:
+                    if txt.lower() in ["novo", "new"]:
+                        novo_status = True
+                    else:
+                        feed_akcije.append(f"• {txt}")
+            label = venue.get("label", "")
+            if label:
+                if label.lower() in ["novo", "new"]:
                     novo_status = True
                 else:
-                    feed_akcije.append(f"• {txt}")
-        # badges mogu biti i u outer["telemetry_venue_badges"]
-        for badge_txt in outer.get("telemetry_venue_badges", []):
-            if isinstance(badge_txt, str) and badge_txt.lower() not in ["novo", "new"]:
-                feed_akcije.append(f"• {badge_txt}")
-
-        label = venue.get("label", "")
-        if label:
-            if label.lower() in ["novo", "new"]:
-                novo_status = True
-            else:
-                feed_akcije.append(f"• {label}")
-
-        restaurants[slug] = {
-            "Address": address,
-            "Platform": "Wolt",
-            "Name": remove_accents(name),
-            "Rating": str(r_score),
-            "Delivery Time": delivery,
-            "Promo": "\n".join(feed_akcije) if feed_akcije else "-",
-            "Status": status_obj,
-            "Time_Num": time_num,
-            "Is_New": novo_status,
-            "Link": f"https://wolt.com/en/srb/{city_slug}/restaurant/{slug}",
-            "_feed_akcije": feed_akcije,
-        }
+                    feed_akcije.append(f"• {label}")
+            restaurants[slug] = {
+                "Address": address,
+                "Platform": "Wolt",
+                "Name": remove_accents(name),
+                "Rating": str(r_score),
+                "Delivery Time": delivery,
+                "Promo": "\n".join(feed_akcije) if feed_akcije else "-",
+                "Status": status_obj,
+                "Time_Num": time_num,
+                "Is_New": novo_status,
+                "Link": f"https://wolt.com/en/srb/{city_slug}/restaurant/{slug}",
+                "_feed_akcije": feed_akcije,
+            }
 
     print(f"[WOLT] Ucitano {len(restaurants)} restorana.")
     
@@ -882,19 +877,9 @@ async def scan_process(addresses, log_ph, live_ph, live_state, generate_pdf=Fals
 
             log_msg(f"\n[SYSTEM] Starting scan for: {adr}", log_ph)
 
-            # GLOVO
-            log_msg("📱 Scrolling GLOVO...", log_ph)
-            context_glovo = await browser.new_context(**ga)
-            await context_glovo.route("**/*", smart_diet_mode)
-            r_glovo = await scrape_glovo(context_glovo, adr, log_ph, live_ph, live_state, error_screenshots, debug_mode)
-            all_data.extend(r_glovo)
-            await context_glovo.close()
-
-            # WOLT (geokodiranje + fallback)
+            # WOLT IDE PRVI - pre Glovo scana da izbegnemo 429 rate limit
             log_msg("🚲 Calling WOLT API (geocoded location)...", log_ph)
             loop = asyncio.get_event_loop()
-            # VAŽNO: scrape_wolt_sync se izvršava u ThreadPoolExecutor
-            # i NE SME da prima Streamlit placeholder-e (NoSessionContext greška)
             r_wolt = await loop.run_in_executor(
                 None, 
                 scrape_wolt_sync, 
@@ -905,6 +890,14 @@ async def scan_process(addresses, log_ph, live_ph, live_state, generate_pdf=Fals
                 refresh_live_ui(live_ph, live_state["Wolt"], live_state["Glovo"], adr)
             log_msg(f"[WOLT] ✅ {len(r_wolt)} restaurants loaded for {adr}.", log_ph)
             all_data.extend(r_wolt)
+
+            # GLOVO
+            log_msg("📱 Scrolling GLOVO...", log_ph)
+            context_glovo = await browser.new_context(**ga)
+            await context_glovo.route("**/*", smart_diet_mode)
+            r_glovo = await scrape_glovo(context_glovo, adr, log_ph, live_ph, live_state, error_screenshots, debug_mode)
+            all_data.extend(r_glovo)
+            await context_glovo.close()
 
         await browser.close()
 
