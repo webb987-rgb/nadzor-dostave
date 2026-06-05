@@ -1178,4 +1178,5 @@ if st.session_state.is_running or st.session_state.loaded_history:
         else: st.sidebar.success("✅ Scan completed. Click 'Start' for a new scan.")
 
 else:
+P
     st.info("System is ready. Enter parameters in the left menu and click 'Start'.")
