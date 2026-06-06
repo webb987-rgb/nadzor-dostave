@@ -447,12 +447,12 @@ def geocode_address(address: str):
         print(f"[WOLT Geocode] Greška: {e}")
     return None
 
-# ── KLJUČNA IZMENA: Paginirana lista restorana ───────────────────────────────
+# ── Lista restorana — originalna logika + paginacija ─────────────────────────
 def wolt_get_restaurants_paged(lat: float, lon: float) -> list:
     """
-    Prolazi kroz SVE stranice (skip=0, 40, 80...) dok ne dobije prazan odgovor.
-    Stara verzija radila je SAMO skip=0 — gubila je većinu restorana!
-    Ovo je direktan port iz promo.py fetch_city() logike.
+    Prolazi kroz stranice (skip=0, 40, 80...) dok ne dobije prazan odgovor.
+    BEZ semafora — lista restorana se radi sekvencijalno, semafor je samo za promo.
+    Ako skip=0 već vrati sve restorane (mali grad), paginacija staje sama.
     """
     if not CURL_CFFI_AVAILABLE:
         return []
@@ -461,16 +461,15 @@ def wolt_get_restaurants_paged(lat: float, lon: float) -> list:
     page_num = 0
     for page_num in range(50):  # max 50 stranica (~2000 restorana)
         url = f"https://restaurant-api.wolt.com/v1/pages/restaurants?lat={lat}&lon={lon}&skip={skip}"
-        _wait_throttle()
         items_this_page = 0
         for attempt in range(4):
             try:
-                time.sleep(random.uniform(0.5, 1.8))
-                with _global_http_sem:
-                    r = curl_requests.get(
-                        url, headers=WOLT_HEADERS,
-                        impersonate="chrome120", timeout=30
-                    )
+                if attempt > 0:
+                    time.sleep(5 * attempt)
+                r = curl_requests.get(
+                    url, headers=WOLT_HEADERS,
+                    impersonate="chrome120", timeout=30
+                )
                 if r.status_code == 200:
                     data = r.json()
                     for section in data.get("sections", []):
@@ -480,9 +479,8 @@ def wolt_get_restaurants_paged(lat: float, lon: float) -> list:
                                 items_this_page += 1
                     break  # uspešan poziv
                 if r.status_code == 429:
-                    wait = 2 + 2 ** attempt
-                    _set_throttle(wait)
-                    print(f"[WOLT] 429 — throttle {wait:.0f}s (str.{page_num+1}, pokušaj {attempt+1})")
+                    wait = 15
+                    print(f"[WOLT] 429 — čekam {wait}s (str.{page_num+1}, pokušaj {attempt+1})")
                     time.sleep(wait)
                     continue
                 print(f"[WOLT] API {r.status_code} na str.{page_num+1}")
@@ -490,7 +488,7 @@ def wolt_get_restaurants_paged(lat: float, lon: float) -> list:
             except Exception as e:
                 print(f"[WOLT] Greška str.{page_num+1}: {e}")
                 if attempt < 3:
-                    time.sleep(1)
+                    time.sleep(3)
         if items_this_page == 0:
             break  # nema više restorana — kraj paginacije
         skip += 40
