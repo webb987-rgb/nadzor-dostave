@@ -357,7 +357,32 @@ wolt_session.headers.update(BROWSER_HEADERS)
 _wolt_session_lock = threading.Lock()
 _wolt_last_refresh_time = 0.0
 
-WOLT_FETCH_WORKERS = 3  # paralelni pozivi za promocije
+# Isto kao u promo.py: FETCH_WORKERS=2 po gradu, globalni semafor ogranicava
+# UKUPAN broj simultanih HTTP zahteva ka Woltu (vise gradova istovremeno = ipak
+# samo max FETCH_WORKERS*CITY_PARALLEL poziva u letu). Ovde skeniramo jedan grad
+# u jednom pozivu funkcije, pa je CITY_PARALLEL efektivno 1, ali zadrzavamo isti
+# kapacitet (6) da ne bude ni brze ni sporije od promo.py kad app_16_.py radi
+# vise adresa/gradova paralelno na vise mesta u kodu.
+WOLT_FETCH_WORKERS = 2          # max simultanih promo HTTP zahteva PO gradu (isto kao promo.py)
+_WOLT_CITY_PARALLEL = 3         # isto kao promo.py CITY_PARALLEL
+_global_wolt_http_sem = threading.Semaphore(WOLT_FETCH_WORKERS * _WOLT_CITY_PARALLEL)
+
+# Globalni throttle: kad jedan thread dobije 429, SVI threadovi cekaju do isteka
+# throttle perioda pre sledeceg poziva ka Woltu (isto kao promo.py _wait_throttle/_set_throttle)
+_wolt_throttle_lock = threading.Lock()
+_wolt_throttle_until = 0.0
+
+def _wolt_wait_throttle():
+    now = time.time()
+    with _wolt_throttle_lock:
+        wait = _wolt_throttle_until - now
+    if wait > 0:
+        time.sleep(wait)
+
+def _wolt_set_throttle(seconds: float):
+    global _wolt_throttle_until
+    with _wolt_throttle_lock:
+        _wolt_throttle_until = max(_wolt_throttle_until, time.time() + seconds)
 
 def _refresh_wolt_session() -> bool:
     """
@@ -391,15 +416,14 @@ def make_wolt_thread_session() -> requests.Session:
     return s
 
 def wolt_get(url: str, ts: requests.Session = None) -> tuple:
-    """GET poziv ka Wolt API-ju, sa auto-refresh sesije na 401/403 i retry na 429."""
+    """GET poziv ka Wolt API-ju, sa globalnim throttle/semaforom, auto-refresh sesije na 401/403 i retry na 429."""
     sess = ts or wolt_session
     for attempt in range(4):
+        _wolt_wait_throttle()
         try:
-            if attempt > 0:
-                wait = 5 * attempt
-                print(f"[WOLT] Retry {attempt}/3, cekam {wait}s...")
-                time.sleep(wait)
-            r = sess.get(url, timeout=20)
+            time.sleep(random.uniform(0.3, 1.2))  # isto kao promo.py _fetch_url
+            with _global_wolt_http_sem:           # globalno ogranicenje — sve HTTP ka Woltu
+                r = sess.get(url, timeout=20)
             if r.status_code == 200:
                 return r.json(), 200
             if r.status_code in (401, 403):
@@ -408,15 +432,16 @@ def wolt_get(url: str, ts: requests.Session = None) -> tuple:
                 sess.cookies.update(wolt_session.cookies)
                 continue
             if r.status_code == 429:
-                print(f"[WOLT] 429 Rate limit, cekam 15s...")
-                time.sleep(15)
+                wait = 2 + 2 ** attempt
+                _wolt_set_throttle(wait)  # globalni throttle - svi threadovi cekaju
+                print(f"[WOLT] 429 Rate limit, globalni throttle {wait:.0f}s...")
                 continue
             print(f"[WOLT] API odgovor: {r.status_code} - {r.text[:200]}")
             return None, r.status_code
         except Exception as e:
             print(f"[WOLT] wolt_get greška: {e}")
             if attempt < 3:
-                time.sleep(3)
+                time.sleep(0.5)
     return None, -1
 
 def wolt_get_restaurants(lat: float, lon: float, skip: int = 0) -> tuple:
@@ -425,28 +450,37 @@ def wolt_get_restaurants(lat: float, lon: float, skip: int = 0) -> tuple:
     return wolt_get(url)
 
 def wolt_fetch_dynamic(slug: str, lat: float, lon: float) -> tuple:
-    """Dohvata promocije za jedan restoran."""
+    """Dohvata promocije za jedan restoran. Koristi isti globalni throttle/semafor kao wolt_get."""
     url = (
         f"https://consumer-api.wolt.com/order-xp/web/v1/venue/slug/{slug}/dynamic/"
         f"?lat={lat}&lon={lon}&selected_delivery_method=homedelivery"
     )
     ts = make_wolt_thread_session()
-    try:
-        time.sleep(random.uniform(0.5, 1.5))
-        r = ts.get(url, timeout=15)
-        if r.status_code == 200:
-            return r.json(), 200
-        if r.status_code in (401, 403):
-            _refresh_wolt_session()
-            ts.cookies.update(wolt_session.cookies)
-            r2 = ts.get(url, timeout=15)
-            if r2.status_code == 200:
-                return r2.json(), 200
-            return None, r2.status_code
-        return None, r.status_code
-    except Exception as e:
-        print(f"[WOLT] Dynamic greška za {slug}: {e}")
-        return None, -1
+    time.sleep(random.uniform(1.0, 2.0))  # isto kao promo.py _fetch_one
+    for attempt in range(4):
+        _wolt_wait_throttle()
+        try:
+            time.sleep(random.uniform(0.3, 1.2))  # isto kao promo.py _fetch_url
+            with _global_wolt_http_sem:
+                r = ts.get(url, timeout=10)
+            if r.status_code == 200:
+                return r.json(), 200
+            if r.status_code in (401, 403):
+                print(f"[WOLT] DYN {slug} -> {r.status_code} (auth fail), session refresh...")
+                _refresh_wolt_session()
+                ts.cookies.update(wolt_session.cookies)
+                return None, r.status_code
+            if r.status_code == 429:
+                wait = 2 + 2 ** attempt
+                _wolt_set_throttle(wait)
+                print(f"[WOLT] DYN {slug} -> 429, globalni throttle {wait:.0f}s...")
+                continue
+            return None, r.status_code
+        except Exception as e:
+            print(f"[WOLT] Dynamic greška za {slug}: {e}")
+            if attempt < 3:
+                time.sleep(0.5)
+    return None, -1
 
 def _parse_dynamic_with_item_discount(data: dict) -> list:
     akcije = []
